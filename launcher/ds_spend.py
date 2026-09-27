@@ -383,7 +383,8 @@ def claude_level(d, now=None):
 
 # --- The DeepSeek balance ---
 
-LOW_DAYS = 7        # warn when the balance lasts fewer days than this at the last week's rate
+LOW_DAYS = 2        # warn when the balance lasts fewer days than this at the last week's rate (was 7: with a
+                    # week-long stretch that warned every session; the user wants it only when very low, 2026-09-27)
 LOW_USD = 2.0       # or when it is below this, whatever the rate
 
 

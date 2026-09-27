@@ -31,6 +31,10 @@ LENGTH = {'five_hour': dt.timedelta(hours=5), 'week': dt.timedelta(days=7)}
 HEAD_START = {'five_hour': 0.25, 'week': 0.1}   # a 5-hour window is bursty; a week should run even
 LEVEL_AT = (1.0, 1.25, 1.5)
 HOLD_USED = 90                                   # hold at this percent used, whatever the pace
+# The week's last day: what isn't used by the reset is lost, so the weekly window stops holding back until 98%
+# and sessions are told to spend the rest; the 5-hour window still paces bursts (the user's call, 2026-09-27).
+SPEND_DOWN = dt.timedelta(hours=24)
+SPEND_DOWN_HOLD = 98
 STALE = dt.timedelta(minutes=60)
 NAMES = {0: 'on pace', 1: 'lean', 2: 'tight', 3: 'hold'}
 DO = {
@@ -127,6 +131,8 @@ def window_pace(k, used, resets, now, start=None):
     gone = max(0.0, min(1.0, (now - start) / length))
     share = used / 100.0
     ratio = share / min(1.0, gone + head)
+    if k == 'week' and resets - now <= SPEND_DOWN:
+        return (3 if used >= SPEND_DOWN_HOLD else 0), ratio, None
     level = 3 if used >= HOLD_USED else sum(ratio > t for t in LEVEL_AT)
     again = start + length * max(0.0, share - head) if level else None
     return level, ratio, (again if again and again < resets else None)
@@ -153,6 +159,9 @@ def status(d, now=None):
         # A per-model window only rules that model out; the pace comes from the 5-hour and all-models ones.
         if not k.startswith('week-') and level > out['level']:
             out.update(level=level, window=k)
+    week = out['windows'].get('week')
+    if week and 0 < (week['resets'] - now).total_seconds() <= SPEND_DOWN.total_seconds() and week['used'] < SPEND_DOWN_HOLD:
+        out['spend_down'] = dict(left=100 - week['used'], hours=(week['resets'] - now).total_seconds() / 3600)
     return out
 
 
@@ -188,6 +197,11 @@ def lines(d, now=None):
     out = [head + '.']
     if s['level']:
         out.append(DO[s['level']])
+    sd = s.get('spend_down')
+    if sd and s['level'] < 2:
+        out.append('The weekly allowance resets in %d hours with %d%% unused, and what is unused then is lost: spend it. '
+                   'Take work on yourself and with Claude subagents rather than waiting on held DeepSeek workers, and use '
+                   'higher effort for the hard parts. The 5-hour window still paces bursts.' % (round(sd['hours']), sd['left']))
     tight_models = [k.replace('week-', '') for k, w in s['windows'].items() if k.startswith('week-') and w['level'] >= 2]
     if tight_models:
         out.append('Avoid %s for subagents this week.' % ', '.join(tight_models))

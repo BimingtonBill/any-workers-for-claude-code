@@ -60,7 +60,7 @@ else:
 WATCH = Path(__file__).resolve().parent / 'ds-watch.ps1'
 CODING_KINDS = ('impl',)  # Claude subagents of these kinds run on Opus unless the plan is tight
 NOTE_EVERY = 1800       # seconds between Claude-pace notes in one session
-BIG_CONTEXT = 400000     # tokens: past this a session re-reads a lot on every turn (one ran at 737k, 2026-09-25)
+COMPACT_AT = 0.7         # suggest /compact once a session's context is this full (the user's call, 2026-09-27)
 
 
 
@@ -298,15 +298,15 @@ def _ds_claude():
     return None
 
 
-def context_tokens(transcript):
-    """The main thread's context at its last turn, from the transcript's tail (0 when unreadable)."""
+def _last_turn(transcript):
+    """(context tokens, model) of the main thread's last turn, from the transcript's tail ((0, '') when unreadable)."""
     try:
         with open(transcript, 'rb') as fh:
             fh.seek(0, 2)
             fh.seek(max(0, fh.tell() - 400000))
             tail = fh.read().decode('utf-8', errors='replace').splitlines()
     except (OSError, TypeError):
-        return 0
+        return 0, ''
     for line in reversed(tail):
         if '"usage"' not in line:
             continue
@@ -314,15 +314,31 @@ def context_tokens(transcript):
             e = json.loads(line)
         except ValueError:
             continue
-        us = (e.get('message') or {}).get('usage') if isinstance(e, dict) else None
+        msg = (e.get('message') or {}) if isinstance(e, dict) else {}
+        us = msg.get('usage')
         if isinstance(us, dict) and not e.get('isSidechain'):
-            return sum(us.get(k) or 0 for k in ('input_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens'))
-    return 0
+            return (sum(us.get(k) or 0 for k in ('input_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens')),
+                    str(msg.get('model') or ''))
+    return 0, ''
+
+
+def context_tokens(transcript):
+    """The main thread's context at its last turn, from the transcript's tail (0 when unreadable)."""
+    return _last_turn(transcript)[0]
+
+
+def context_window(model):
+    """The session's context window in tokens: DS_CONTEXT_WINDOW if set, 200k for Haiku, else 1M (the Opus and
+    Sonnet sessions here run with 1M; one reached 737k without compacting, 2026-09-25)."""
+    try:
+        return int(os.environ['DS_CONTEXT_WINDOW'])
+    except (KeyError, ValueError):
+        return 200000 if 'haiku' in model.lower() else 1000000
 
 
 def claude_note(event, now=None):
     """At most every NOTE_EVERY seconds a session: the Claude plan's pace when it is off pace or the
-    reading is missing or old, and a hand-over nudge past BIG_CONTEXT. '' when there is nothing to say."""
+    reading is missing or old, and a /compact suggestion past COMPACT_AT of the context window. '' when there is nothing to say."""
     import time
     ds_claude = _ds_claude()
     if ds_claude is None:
@@ -339,17 +355,18 @@ def claude_note(event, now=None):
     parts = []
     if now - float(seen.get(sid) or 0) >= NOTE_EVERY:
         s = ds_claude.status(d)
-        if s['level'] is None or s['level'] or s['stale']:
+        if s['level'] is None or s['level'] or s['stale'] or s.get('spend_down'):
             parts += ds_claude.lines(d)
-        size = context_tokens(event.get('transcript_path'))
-        if size > BIG_CONTEXT:
+        size, model = _last_turn(event.get('transcript_path'))
+        if size >= COMPACT_AT * context_window(model):
             # The user compacts rather than starting new sessions (2026-09-25): a fresh session would also miss
             # the finish notices of workers this one launched.
-            parts.append('This session re-reads about %dk tokens on every turn. At the next quiet moment (nothing '
+            parts.append('This session re-reads about %dk tokens on every turn, %d%% of its context window.'
+                         ' At the next quiet moment (nothing '
                          'mid-edit, no worker still running whose finish notice this session must get), suggest the '
                          'user runs /compact. Before that, make sure the state lives in files that survive it (the '
                          'handoff, the team log, or local/handover-<date>.md). Until then, hand big reading to '
-                         'DeepSeek workers.' % (size // 1000))
+                         'DeepSeek workers.' % (size // 1000, 100 * size // context_window(model)))
         if parts:
             seen[sid] = now
     # Worker memory, on its own clock (the check runs git, about 0.6 s): the morning report says it only at
@@ -523,7 +540,9 @@ def session_start(event):
 # A budget instruction to one session has to reach the launcher, which every session shares: on 2026-09-26 a
 # "make it last a month" told to one session was saved in its project memory with no ds_spend.py command, so the
 # old daily limit stayed in force for hours until another session applied `stretch 1m`.
-BUDGET_WORDS = re.compile(r'\b(deepseek|credit|top(ped)?[- ]?up|spend(ing)?|budget)\b', re.I)
+# DeepSeek or credit named outright: "add the end-of-week spend-down" (about Claude's own weekly allowance) matched
+# the old 'spend' and 'week' and got the DeepSeek reminder (2026-09-27).
+BUDGET_WORDS = re.compile(r'\b(deepseek|credit|top(ped)?[- ]?up)\b', re.I)
 BUDGET_ASK = re.compile(r'\b(last|month|months|week|weeks|days?|limit|cap|stretch|per day|per week|topped|top[- ]?up|raise|lower)\b', re.I)
 
 
