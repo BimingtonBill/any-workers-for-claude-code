@@ -1,4 +1,4 @@
-# DeepSeek agents for Claude Code
+# Any Workers for Claude Code
 
 An add-on for [Claude Code](https://claude.com/claude-code) that gives Claude a team of cheap helpers.
 Claude stays in charge: it splits a job up, hands pieces to DeepSeek AI "workers" that run in the background
@@ -9,7 +9,10 @@ Python script, a game, a Rust or .NET app.
 A typical worker task costs a few cents and a big one up to about 20 cents, so a $5 DeepSeek top-up goes a
 long way.
 
-*An independent community project, not made or endorsed by Anthropic or DeepSeek.*
+Workers run on DeepSeek today; other model providers (Meta's Muse Spark, Xiaomi's MiMo) are being tested for a
+later release. Formerly "DeepSeek agents for Claude Code".
+
+*An independent community project, not made or endorsed by Anthropic, DeepSeek, Meta or Xiaomi.*
 
 ## Install
 
@@ -21,9 +24,9 @@ key under **API keys**.
 Open the Claude desktop app, go to the **Code** tab, start a session, and paste this in:
 
 ```text
-Please install "DeepSeek agents for Claude Code" for me.
+Please install "Any Workers for Claude Code" for me.
 
-1. Download https://github.com/BimingtonBill/deepseek-agents-for-claude-code/releases/latest/download/deepseek-agents-for-claude-code.zip into a new folder called "deepseek-agents-setup" in my Downloads folder, and unzip it there.
+1. Download https://github.com/BimingtonBill/any-workers-for-claude-code/releases/latest/download/any-workers-for-claude-code.zip into a new folder called "deepseek-agents-setup" in my Downloads folder, and unzip it there.
 2. Read setup.ps1 in the unzipped folder so you know what it does, then run it:
    powershell -NoProfile -ExecutionPolicy Bypass -File setup.ps1
    It installs the skills and checks for Python and Claude Code. If I haven't saved a DeepSeek API key yet, it opens a separate window where I type the key myself.
@@ -38,7 +41,7 @@ the chat, which would save it; the window stores it privately on your computer. 
 Claude app.**
 
 To install by hand instead, download the zip from the
-[latest release](https://github.com/BimingtonBill/deepseek-agents-for-claude-code/releases/latest), unzip it,
+[latest release](https://github.com/BimingtonBill/any-workers-for-claude-code/releases/latest), unzip it,
 double-click **`install.cmd`**, and reopen the Claude app.
 
 ## Using it
