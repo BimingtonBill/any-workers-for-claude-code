@@ -52,7 +52,7 @@ KINDS = {
     'task': 'unclassified',
 }
 
-# Labels used before the manifest existed, in the DOA Xbox360 UI and OpenSkyrim projects.
+# Labels used before the manifest existed, in the Project B and Project A projects.
 LEGACY = [
     (r'^t\d+', 'research'), (r'^i\d+', 'impl'), (r'^c\d+', 'digest'),
     (r'^review-', 'review'), (r'^fix-', 'impl'), (r'^analyst', 'analysis'),

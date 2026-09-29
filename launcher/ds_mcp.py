@@ -29,7 +29,7 @@ IMPL = os.environ.get('DS_IMPL_SCRIPT', '')
 def _max_coders():
     """How many coders one spawn_workers call may run at once: the project's "leadCoders" in
     .deepseek-agents.json, else 1. Each coder gets its own worktree and build (about 11 GB seeded for
-    OpenSkyrim), and overlapping builds ran the machine out of memory on 2026-09-23."""
+    Project A), and overlapping builds ran the machine out of memory on 2026-09-23."""
     try:
         value = int(json.loads((Path(WORK_DIR) / '.deepseek-agents.json').read_text(encoding='utf-8-sig')).get('leadCoders') or 1)
     except (OSError, ValueError, TypeError, AttributeError):
@@ -39,7 +39,7 @@ def _max_coders():
 
 KINDS = ('research', 'websearch', 'impl', 'review', 'analysis', 'critic', 'digest')
 # Workers a lead starts are read-only and have no shell, so a brief telling one to run a command sends it
-# into workarounds until its turns run out (OpenSkyrim, 2026-09-23: research-001-glow-emissive and
+# into workarounds until its turns run out (Project A, 2026-09-23: research-001-glow-emissive and
 # research-003-snow-ice both died at 90 turns on denied python/cargo commands, and the lead had to rewrite
 # and rerun them). The launcher warns Claude about this; a lead only saw the wreckage. A command is a tool
 # word followed by a space or the end, or a ./ path; a name that merely starts with one (make_cand,

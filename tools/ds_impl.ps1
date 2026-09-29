@@ -86,9 +86,9 @@ $env:Path = $pathEntries -join ';'
 
 # Each Rust checkout builds into its own target/ (inside the worktree, so -Discard removes it). A shared
 # target/ is NOT safe: Cargo gives a workspace crate's test binary the same name in every checkout, so
-# parallel workers overwrote and ran each other's binaries (OpenSkyrim impl-006/impl-007, 2026-09-22).
+# parallel workers overwrote and ran each other's binaries (Project A impl-006/impl-007, 2026-09-22).
 # To avoid a cold build per task, the new target/ is seeded with a copy of the lead's built profiles
-# (without incremental/, which is only valid for the checkout that wrote it): on OpenSkyrim, 6.6 GB
+# (without incremental/, which is only valid for the checkout that wrote it): on Project A, 6.6 GB
 # copied in 6 s, and the test build then recompiled only the workspace's own two crates (17 s).
 # The crate may sit in a subfolder (restir-water keeps it in gpu/, H2): the first Cargo.toml found at the
 # root or one level down is the crate, and the target/ goes beside it, where cargo would put it anyway.
@@ -119,7 +119,7 @@ function Set-TaskTarget([string]$Worktree, [switch]$Seed) {
         }
         $t0 = Get-Date
         # /R:0 /W:0: a locked file is skipped, not retried. robocopy's defaults (/R:1000000 /W:30) turned one
-        # file held by the lead's own build into a 50-minute stall (OpenSkyrim impl-166, 2026-09-24). The seed
+        # file held by the lead's own build into a 50-minute stall (Project A impl-166, 2026-09-24). The seed
         # is only a warm cache: cargo rebuilds whatever is missing.
         $out = @(Invoke-Native { & robocopy.exe $profile.FullName (Join-Path $target $profile.Name) /E /MT:16 /R:0 /W:0 /XD incremental /NFL /NDL /NJH /NJS /NP })
         $code = $LASTEXITCODE
@@ -273,7 +273,7 @@ if ($Integrate) {
         Fail "$Integrate's last recorded acceptance did not pass (outcome=$($lastRow.outcome)); refusing to integrate broken work. Fix it and re-run -Post $Integrate, or pass -Force to copy it anyway: -Integrate $Integrate -Force"
     }
     # Every coder ds_impl runs leaves a row, so none means its acceptance was never checked here. Don't let
-    # that pass as clean (OpenSkyrim audit finding HT-20260924-04): check it first, or say so with -Force.
+    # that pass as clean (Project A audit finding HT-20260924-04): check it first, or say so with -Force.
     if (-not $lastRow -and -not $Force) {
         Fail "no acceptance is recorded for $Integrate, so nothing says it works. Run its checks first (-Post $Integrate), or pass -Force to copy it anyway: -Integrate $Integrate -Force"
     }
@@ -323,7 +323,7 @@ if ($Integrate) {
         if (-not (Test-Path -LiteralPath $from)) { "[ds-impl] $file was not written, skipped"; continue }
         $to = Join-Path $root $file
         # The worker started from $info.base. If the lead has changed this file since, copying the whole
-        # file over silently throws those changes away (OpenSkyrim, 2026-09-23: a DemoStart entry and a
+        # file over silently throws those changes away (Project A, 2026-09-23: a DemoStart entry and a
         # plugin registration, both found afterwards by grep). Leave such a file alone and say so; the
         # worker's own change can be applied as a patch instead. This covers every file in the task's
         # list, not only the ones its brief calls owned: both losses above were one-line changes to
@@ -338,7 +338,7 @@ if ($Integrate) {
         Copy-Item -LiteralPath $from -Destination $to -Force
         # Copy-Item keeps the worker's write time. If the lead built after the worker wrote the file,
         # cargo sees the integrated source as older than the build and reuses the stale binary
-        # (OpenSkyrim impl-013: a release build "finished" in 1 s after 3 engine files changed).
+        # (Project A impl-013: a release build "finished" in 1 s after 3 engine files changed).
         (Get-Item -LiteralPath $to).LastWriteTime = Get-Date
         $copied += $file
     }
@@ -404,7 +404,7 @@ if ($fromLead) {
     }
     # The project's denyEdit protects the main checkout from direct edits, which a worktree coder never
     # makes; its work reaches the checkout only through Claude's -Integrate. So a lead may give a coder
-    # protected source (OpenSkyrim's crates/**: four leads landed no code on 2026-09-23 because this rule
+    # protected source (Project A's crates/**: four leads landed no code on 2026-09-23 because this rule
     # used to cover denyEdit too). The files that govern workers themselves stay Claude's.
     foreach ($file in $owned) {
         $f = $file -replace '\\', '/'
@@ -422,7 +422,7 @@ $baseCommit = $baseCommit.Trim()
 $work = Join-Path $implRoot $Name
 
 # Size check before any money is spent. How big the owned files are predicts a coder's length far better
-# than how many there are or how long the brief is: over 38 OpenSkyrim coders (2026-09), under 4,000
+# than how many there are or how long the brief is: over 38 Project A coders (2026-09), under 4,000
 # owned lines took a median of about 95 steps, 4,000-8,000 took 124 (69% over 100), and over 8,000 took
 # 186 (94% over 100). Every step re-reads the context, so those long runs cost the most.
 $ownedLines = 0
@@ -439,7 +439,7 @@ if ($sizeNote) { "[ds-impl] size: $sizeNote" }
 
 # A run folder the brief names (a review to fix: local/agents/runs/<run id>/report.md) is added read-only. The
 # worktree has no local/, and the project's is outside the coder's reach, so one could not read the review it was
-# fixing (DOA, 2026-09-29). Only the named runs of this project's own state folder, and only ones that exist.
+# fixing (Project B, 2026-09-29). Only the named runs of this project's own state folder, and only ones that exist.
 $runFolders = @()
 foreach ($m in [regex]::Matches($briefText, '(?i)agents[\\/]runs[\\/]([A-Za-z0-9][A-Za-z0-9._-]*)')) {
     $folder = Join-Path (Join-Path $stateDir 'runs') ($m.Groups[1].Value.TrimEnd('.'))
@@ -524,7 +524,7 @@ $status = if ($footer -match 'status=(\S+)') { $Matches[1] } else { 'unknown' }
 
 # No footer means the worker never ran (the launcher failed: no claude.exe, no key, a bad flag). Running
 # the acceptance builds then only costs minutes and records a misleading FAIL against an untouched
-# checkout (reported by the OpenSkyrim session, 2026-09-22), so stop and say what happened.
+# checkout (reported by the Project A session, 2026-09-22), so stop and say what happened.
 # The launcher's exit code says why (see ds-agent.ps1): 4 held by the budget or pace (or stopped at a spend limit),
 # 3 timed out; anything else is a launch problem.
 if (-not $footer) {
@@ -587,12 +587,12 @@ Write-PilotRow -Row $row -Task $Name -Dedupe:([bool]$Post)
 if (-not $accepted) { exit 1 }
 
 # Keep the tracks busy: the next coder can start (this one's build is done), and a read-only review of
-# this one runs beside it, since it builds nothing. OpenSkyrim ran 78 coders and 8 reviews in three days
+# this one runs beside it, since it builds nothing. Project A ran 78 coders and 8 reviews in three days
 # (2026-09-22..24), with one worker at a time for 59% of the time workers ran.
 $reviewLabel = 'review-' + ($Name -replace '^impl-', '')
 $acceptList = if ($checks) { ($checks | ForEach-Object { "'$_'" }) -join ', ' } else { '(none recorded)' }
 $reviewTask = "Review coder task $Name. Its brief: $briefPath. You are working in its git worktree; the main checkout, for comparison, is $root. The changed files are $($touched -join ', '). First see the change itself with 'git status' and 'git diff' (new files show in git status; read them). Then re-run the acceptance commands yourself: $acceptList, and say what you ran and what it printed; don't rely on the coder's own log. Check that the change does what the brief asks and nothing more, stays in its owned files, and is covered by its tests, and look for what the acceptance commands would miss. Read-only: report findings with file:line; do not fix anything."
-# Reviewers could run nothing before (10 of 19 OpenSkyrim reviews said so, 2026-09-25): allow the diff and the checks.
+# Reviewers could run nothing before (10 of 19 Project A reviews said so, 2026-09-25): allow the diff and the checks.
 $reviewRules = @('Bash(git status*)', 'Bash(git diff*)', 'Bash(git log *)', 'Bash(git show *)') + @($checks | Where-Object { $_ -and $_ -notmatch ',' } | ForEach-Object { "Bash($_)"; "Bash($_ *)" })
 "[ds-impl] next, in one message: start the next coder now, and this review worker for $Name beside it (it works in this worktree and builds only there):"
 "  powershell -NoProfile -ExecutionPolicy Bypass -File `"$agent`" -Kind review -Mode read -Effort high -Dir `"$work`" -AddDir `"$root`" -AllowTools `"$($reviewRules -join ',')`" -Label $reviewLabel -Task `"$reviewTask`""

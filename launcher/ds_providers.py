@@ -6,7 +6,7 @@
 The registry is providers.json beside this file. ~/.claude-deepseek/providers.json (or DS_PROVIDERS_USER) holds
 the user's own additions and opt-ins, for example:
 
-    {"contributorProjects": {"meta": ["C:/Modding/OpenSkyrimProject"]}}
+    {"contributorProjects": {"meta": ["C:/Projects/project-a"]}}
 
 A training ("contributor") tier is allowed only for a project the user listed there: the opt-in lives in the
 user's own settings, never in a project's .deepseek-agents.json, so no committed file (a pull request to a

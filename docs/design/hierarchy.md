@@ -72,7 +72,7 @@ checks itself. Use Tier A when the parts deserve their own review.
   briefs.
 - The Google scaling study found that centralized coordination contains errors (about 4x amplification
   against 17x for independent agents) and that multi-agent setups lose on sequential tasks.
-- DOA: 0 of 9 implementation results were accepted without correction, and a verifying consolidator was
+- Project B: 0 of 9 implementation results were accepted without correction, and a verifying consolidator was
   itself wrong on its headline. Each level adds a place where errors get summarized away.
 
 So the rules are:
@@ -154,7 +154,7 @@ exactly as it does for coders Claude starts.
 
 ## A lead cannot brief a read-only worker to run commands (2026-09-23)
 
-OpenSkyrim's overnight run: `research-001-glow-emissive.1` and `research-003-snow-ice.1`, both children of
+Project A's overnight run: `research-001-glow-emissive.1` and `research-003-snow-ice.1`, both children of
 `lead-026`, died at `error_max_turns` (91 turns) with no report. The lead's own report says why: their
 briefs told them to run `python` and `cargo` commands, which read-only workers have no shell for at all.
 Both were rewritten and rerun with `max_turns` 200, so the night cost two wasted runs and the lead's time.
@@ -172,7 +172,7 @@ commands named. The lead rewrote the brief as a read-only job, added "Do not run
 
 ## A lead is told where each child's report is saved (2026-09-23)
 
-`lead-026-visual-gaps.1` (OpenSkyrim) wrote that one child's report "was not written to
+`lead-026-visual-gaps.1` (Project A) wrote that one child's report "was not written to
 `local/agents/runs/` by the harness" and that it had recovered the text from the spawn output. It was
 wrong: `runs/research-006-snow-ice.1/report.md` is on disk, 25,935 bytes, written at 00:00, three minutes
 before the lead finished, and the launcher writes that file on every path that produces a result. The
@@ -188,7 +188,7 @@ handed, plus the header comment and the `[ds-agent]` footer line the file adds.
 
 ## A lead's coder may own protected source; one coder per call (2026-09-23)
 
-OpenSkyrim's portal session reported four leads (lead-070, -071, -072, -102) that landed no code: every
+Project A's portal session reported four leads (lead-070, -071, -072, -102) that landed no code: every
 coder they tried was refused with "a lead may not give a coder a protected file (crates/...rs matches
 crates/**)". That rule treated the project's `denyEdit` as off limits to a lead's coders. But `denyEdit`
 protects the main checkout from direct edits, and a coder only ever edits its own worktree; its work

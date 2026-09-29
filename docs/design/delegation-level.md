@@ -53,9 +53,9 @@ it on the next `--set`. Everything else in AGENTS.md is left alone.
 - **Guidance:** the levels describe what Claude delegates. No launcher can judge whether a task "could be
   briefed". The rules are written so Claude can apply them in the moment.
 - **Never scaled down:** at every level Claude keeps the conversation with the user, design decisions,
-  integration, security-sensitive work, and review of every worker result it acts on. DOA's record
+  integration, security-sensitive work, and review of every worker result it acts on. Project B's record
   (0 of 9 implementations accepted without correction) is why the review floor doesn't move with the dial.
 
 ## Where the existing projects sit
 
-DOA Xbox360 UI and OpenSkyrim were set to 7 on the old scale, which is 4 ("Claude manages").
+Project B and Project A were set to 7 on the old scale, which is 4 ("Claude manages").

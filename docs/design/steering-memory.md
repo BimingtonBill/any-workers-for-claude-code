@@ -1,6 +1,6 @@
 # Nudges, project memory and the morning report
 
-Built 2026-09-24 from the OpenSkyrim night of 2026-09-23: the 20 runs of 100+ steps made up 85% of
+Built 2026-09-24 from the Project A night of 2026-09-23: the 20 runs of 100+ steps made up 85% of
 the night's spend; coders slept 73 minutes waiting on background builds; "cd" was refused 103 times; two
 runs lost their reports; and every worker explored the project from scratch.
 
@@ -26,10 +26,10 @@ Whether nudged workers stop sooner is not proven yet: the next nights' morning r
 
 ## Brief size check (`tools/ds_impl.ps1`)
 
-Over 38 OpenSkyrim coders, owned-file size predicted length; file count and brief length hardly did:
+Over 38 Project A coders, owned-file size predicted length; file count and brief length hardly did:
 under 4,000 owned lines, a median of about 95 steps; 4,000-8,000, 124 (69% over 100); over 8,000, 186
 (94% over 100). `ds_impl.ps1` prints a size note above 4,000 lines, before any money is spent. Caveat:
-the lines were counted at today's HEAD, not at each run's base, and OpenSkyrim's largest files have
+the lines were counted at today's HEAD, not at each run's base, and Project A's largest files have
 since been split, so the bands are approximate.
 
 ## Project memory (`tools/ds_memory.py`)
@@ -49,7 +49,7 @@ tasks, in the morning reports' step counts.
 
 ## Morning report (`tools/ds_morning.py`)
 
-Local only; 2.7 s for OpenSkyrim's 42 runs of a night. `ds_hook.py` runs its short form at SessionStart
+Local only; 2.7 s for Project A's 42 runs of a night. `ds_hook.py` runs its short form at SessionStart
 (startup, resume) and hands it to Claude as context when workers ran since the last report, saving the
 full report under `<state dir>/reports/`. Simulated session starts: the first printed the summary and the
 report path; a second, with nothing new, printed nothing; a folder without `local/` printed nothing.

@@ -100,12 +100,12 @@ foreach ($j in $jobs) {
     Write-Output ''
     Write-Output "===== report from $runId ====="
     # Where the same report is on disk, so a lead can re-read it instead of guessing a path or scraping
-    # this output. lead-026 (OpenSkyrim, 2026-09-23) reported a child's report as "not written by the
+    # this output. lead-026 (Project A, 2026-09-23) reported a child's report as "not written by the
     # harness" and recovered it from the spawn text; the file was there all along.
     $reportPath = Join-Path (Join-Path $stateDir 'runs') (Join-Path $runId 'report.md')
     if (Test-Path -LiteralPath $reportPath) { Write-Output "(also saved at $reportPath)" }
     # A long report comes back as its start and end, with the rest left in the saved file. Whatever a lead
-    # takes in, it re-reads on every later step: OpenSkyrim leads' children wrote a median of 17,000
+    # takes in, it re-reads on every later step: Project A leads' children wrote a median of 17,000
     # characters each, and one lead took in 211,000 (docs/todo.md item 6).
     $body = ($text -split "`r?`n" | Where-Object { $_ -notmatch '^\[ds-agent\] run=' }) -join "`n"
     if ($ReportChars -gt 0 -and $body.Length -gt $ReportChars -and (Test-Path -LiteralPath $reportPath)) {

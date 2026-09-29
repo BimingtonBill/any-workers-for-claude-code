@@ -1,7 +1,7 @@
 """The standard opening of every worker report (and Claude subagent report), so Claude can read a few lines
 instead of the whole thing.
 
-On 2026-09-25 the OpenSkyrim sessions pulled about 2.1M characters of worker output into their own context
+On 2026-09-25 the Project A sessions pulled about 2.1M characters of worker output into their own context
 in 20 hours (reports ran 6-12k characters), 11 of 19 reviews had no verdict line, and fewer than half the
 reports said what was left. Every report now opens with:
 
@@ -150,7 +150,7 @@ def partial_text(transcript, since=None):
 def save_partial(manifest, why):
     """Keep the partial output of the run in `manifest` (its manifest.json) in its report: a new report marked partial,
     or, after an earlier launch's report (a resume), a section added to it. Returns the report's path, or None when
-    the worker had written nothing. A launcher killed from outside (`timeout 5400 powershell ...`, DOA 2026-09-29)
+    the worker had written nothing. A launcher killed from outside (`timeout 5400 powershell ...`, Project B 2026-09-29)
     can't do this itself; the next launch that finds the run does."""
     m = read_json(manifest, {})
     if not isinstance(m, dict) or not m.get('transcript') or not m.get('report'):
@@ -199,7 +199,7 @@ def work_turns(transcript, since=None):
 def api_retry(result, turns):
     """(resume it?, why) for a worker's result and the turns that did work (work_turns): resume once when it ended on
     an API error after doing some work, since such an error mid-run is usually passing (a MiMo coder stopped on "API
-    Error: 400 Request failed" after 30 turns and carried on fine when resumed by hand at the same context, DOA
+    Error: 400 Request failed" after 30 turns and carried on fine when resumed by hand at the same context, Project B
     2026-09-29). Not when its provider's content filter refused it, not when it failed on its first request (a bad
     key, an empty balance, a setting the provider refuses: it would fail the same way again), and not for errors of
     that lasting sort later on. A timeout never gets here: the launcher records that itself."""

@@ -206,7 +206,7 @@ function Search-Claude {
     if (Test-Path -LiteralPath $native) { return $native }
     # The Claude desktop app is a Store (MSIX) package: its real files are under
     # %LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude. Only processes inside the package see
-    # them at %APPDATA%\Claude, so a shell outside it (reported by OpenSkyrim, 2026-09-22) must look in
+    # them at %APPDATA%\Claude, so a shell outside it (reported by Project A, 2026-09-22) must look in
     # both places. Newest version wins.
     $bundled = @(
         Get-ChildItem "$env:APPDATA\Claude\claude-code\*\claude.exe" -ErrorAction SilentlyContinue
@@ -603,7 +603,7 @@ function Get-KindFromLabel([string]$Name) {
     foreach ($k in 'research', 'websearch', 'impl', 'review', 'analysis', 'critic', 'advisor', 'digest', 'lead', 'selftest', 'probe') {
         if ($n.StartsWith("$k-") -or $n -eq $k) { return $k }
     }
-    # Names used before the manifest existed (DOA Xbox360 UI and OpenSkyrim).
+    # Names used before the manifest existed (Project B and Project A).
     switch -Regex ($n) {
         '^t\d+'                  { return 'research' }
         '^i\d+'                  { return 'impl' }
@@ -618,7 +618,7 @@ function Get-KindFromLabel([string]$Name) {
 }
 if (-not $Kind) { $Kind = Get-KindFromLabel $label }
 # A made-up prefix (docs-030-..., doc-065-...) leaves the run as "task", so the panel, the manifest and
-# ds_report all lose what sort of work it was. Say so once; the run still goes ahead (OpenSkyrim, 2026-09-23).
+# ds_report all lose what sort of work it was. Say so once; the run still goes ahead (Project A, 2026-09-23).
 if ($Kind -eq 'task' -and -not $PSBoundParameters.ContainsKey('Kind')) {
     Note "'$label' does not start with a kind, so this run is recorded as 'task'. Name it <kind>-<nnn>-<slug> (research, websearch, impl, review, analysis, critic, digest, advisor, lead) or pass -Kind."
 }
@@ -786,7 +786,7 @@ if ($unrunnable) {
 }
 # --- Brief against reachable files: a worker reads only its own folder and the -AddDir / readOnlyDirs folders
 # (blockReadsOutsideWorkingDirectories). A coder in a ds_impl worktree could not read the review it was fixing, under
-# the project's local/agents/runs, and another could not read an emulator save folder on D:\ (DOA, 2026-09-29). Warn
+# the project's local/agents/runs, and another could not read an emulator save folder on D:\ (Project B, 2026-09-29). Warn
 # about paths the brief names that exist but that the worker can't reach; paths that don't exist are skipped. ---
 if (-not $isWebsearch) {
     $named = @()
@@ -818,7 +818,7 @@ if (-not $isWebsearch) {
     }
 }
 # --- Brief sections: without "Done when" and "Report" the worker guesses when to stop and what to return
-# (30 of 54 OpenSkyrim briefs had no "Done when", 20 no "Scope", 2026-09-25). Templates per kind are in
+# (30 of 54 Project A briefs had no "Done when", 20 no "Scope", 2026-09-25). Templates per kind are in
 # this skill's templates/ folder. Inline -Task briefs (the reviews ds_impl suggests) are not checked. ---
 if ($TaskFile -and $label -notmatch '^(audit-|digest-(map|pitfalls|checklists)$)') {
     $needed = if ($Kind -eq 'websearch') { @('Goal', 'Done when', 'Report') } else { @('Goal', 'Scope', 'Done when', 'Report') }
@@ -1152,7 +1152,7 @@ foreach ($orphan in @(Get-ChildItem -LiteralPath $stateDir -Filter '*.json' -Fil
             $om = [IO.File]::ReadAllText($orphanFile, $utf8) | ConvertFrom-Json
             if ($om.state -eq 'working' -or $om.state -eq 'submitted') {
                 # Keep what the worker had written, as the launcher's own timeout does (ds_envelope.py partial): a launcher
-                # killed from outside (`timeout 5400 powershell ...`, DOA 2026-09-29) left no report at all.
+                # killed from outside (`timeout 5400 powershell ...`, Project B 2026-09-29) left no report at all.
                 $keptAt = $null
                 if ($python -and $om.state -eq 'working' -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'ds_envelope.py'))) {
                     $keptAt = ((Invoke-Native { & $python -S (Join-Path $PSScriptRoot 'ds_envelope.py') partial --manifest $orphanFile `
@@ -1240,7 +1240,7 @@ try {
 
     $deadline = $started.AddMinutes($TimeoutMinutes)
     # At 75% of the timeout the worker is told to finish the change in hand and report (ds_steer.py time_nudge), so it
-    # isn't stopped mid-edit with nothing reported (a DOA coder hit its 90 minutes that way, 2026-09-29).
+    # isn't stopped mid-edit with nothing reported (a Project B coder hit its 90 minutes that way, 2026-09-29).
     $timeArgs = @(if ($TimeoutMinutes -gt 0) { '--deadline', $deadline.ToString('o'), '--timeout-minutes', [string]$TimeoutMinutes })
     $spendStop = $null
     while (-not $proc.HasExited -and (Get-Date) -lt $deadline) {
@@ -1427,7 +1427,7 @@ if ($status -eq 'ok' -and $reportText -and $reportText.Trim().Length -lt 400 -an
     Note "$($prov.name)'s content filter refused this run partway: nothing usable came back. Run it on another provider (-Provider deepseek)."
 }
 # --- One automatic resume after an API error: a MiMo coder stopped on "API Error: 400 Request failed" after 30 turns,
-# mid-edit, and carried on fine at the same context when resumed by hand (DOA, 2026-09-29). ds_envelope.py retry
+# mid-edit, and carried on fine at the same context when resumed by hand (Project B, 2026-09-29). ds_envelope.py retry
 # decides: not after a first-request failure, a content-filter refusal or a lasting error (a key, a balance). Nor on
 # the retry itself, nor for a training-tier run (it can't be resumed), nor with under 2 minutes or no cost cap left.
 # The resume goes through -Resume in a child launcher, so the run keeps its id, its report gains a section, and each
@@ -1462,7 +1462,7 @@ if ($parsed.permission_denials) {
     if ($deniedList) { $footer += " denied=$($deniedList -join ',')" }
 }
 # A websearch worker that made no web calls can't have read the pages it cites (websearch-718-fun-sky-weather.1
-# finished in one turn with invented links, OpenSkyrim 2026-09-26): say so before anyone uses it.
+# finished in one turn with invented links, Project A 2026-09-26): say so before anyone uses it.
 $noWeb = $Kind -eq 'websearch' -and $webCalls -eq 0 -and $state.transcript -and (Test-Path -LiteralPath $state.transcript)
 if ($noWeb) {
     $reportText = "**Warning from the launcher: this websearch worker made no web calls (no WebSearch or WebFetch), so nothing below comes from the web. Treat every source and link in it as invented.**`n`n" + $reportText
@@ -1475,7 +1475,7 @@ if ($resumed -and (Test-Path -LiteralPath $manifest.report)) {
     [IO.File]::WriteAllText($manifest.report, "<!-- $runId ($Kind): $Title -->`n" + $reportText + "`n`n" + $footer + "`n", $utf8)
 }
 # Print the report's standard opening and its path, not the whole report: reports run 6-12k characters,
-# and every one Claude reads stays in its context (2.1M characters in 20 hours, OpenSkyrim 2026-09-25).
+# and every one Claude reads stays in its context (2.1M characters in 20 hours, Project A 2026-09-25).
 function Write-Report {
     $envelope = $null
     if ($envelopeOn -and -not $FullReport) {

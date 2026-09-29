@@ -10,7 +10,7 @@ Two read-only DeepSeek workers (via the `deepseek-agents` skill's `ds-agent.ps1`
 - **Deep advisor:** cycles continuously, **one current question at a time**.
 - **Quick advisor:** a **round review**, launched once per test round after you record the round's results. It lists verification gaps.
 
-## What the first long run taught (DAO Xbox UI port, 2026-09-19: 7 deep and 14 quick reports)
+## What the first long run taught (Project B console UI port, 2026-09-19: 7 deep and 14 quick reports)
 
 - **The deep advisor pays for itself.** Three of its seven answers became fixes, among them a state the code wrote as floats while the engine read int32.
   - It re-answered the same question three times in a row while the question list lagged behind the work.

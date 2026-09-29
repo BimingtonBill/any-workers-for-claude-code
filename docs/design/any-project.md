@@ -1,7 +1,7 @@
 # Workers in any project
 
 The user's aim (2026-09-26): "anyone should be able to install deepseek workers and point it at any
-project". The read-only kinds already worked anywhere; coders (`tools/ds_impl.ps1`) assumed OpenSkyrim's
+project". The read-only kinds already worked anywhere; coders (`tools/ds_impl.ps1`) assumed Project A's
 Rust layout, and an npm project's lead bypassed ds_impl for plain `-Mode edit` (another project, 2026-09-26).
 
 ## What changed
@@ -18,7 +18,7 @@ Rust layout, and an npm project's lead bypassed ds_impl for plain `-Mode edit` (
   project doesn't ignore it: worktrees and run records no longer show as untracked files, and no tracked file
   changes.
 - **A neutral coder template**, `templates/brief-impl.md`, replaces `brief-implementation.md`, which named
-  Bevy, CARGO_TARGET_DIR and OpenSkyrim's tasks folder and was used by no code.
+  Bevy, CARGO_TARGET_DIR and Project A's tasks folder and was used by no code.
 - **Hook fix found on the way.** Splitting `T="C:/.../DeepSeek Workers/tools/ds_impl.ps1"` at the space made
   the hook read the tail as a direct call, so `-Integrate "$T"` was refused as a worker launch. Quotes inside a
   word now keep it whole.

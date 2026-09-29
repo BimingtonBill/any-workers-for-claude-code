@@ -1,6 +1,6 @@
 """Claude plan pacing: how fast a Claude session should work now, from the plan's usage windows.
 
-On 2026-09-24/25 the DeepSeek limit held coders from 01:15, the OpenSkyrim sessions carried the work
+On 2026-09-24/25 the DeepSeek limit held coders from 01:15, the Project A sessions carried the work
 themselves (35 Claude subagents, 81 edits) and the account hit its 5-hour limit, with the weekly one mostly used.
 DeepSeek spend is paced (ds_spend.py); this paces Claude the same way, and lets each budget lean on the
 other.

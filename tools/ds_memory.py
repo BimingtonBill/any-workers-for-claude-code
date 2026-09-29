@@ -239,7 +239,7 @@ def report_body(path):
     lines = [x for x in text.splitlines() if not x.startswith('<!-- ') and not x.startswith('[ds-agent] run=')]
     body = '\n'.join(lines).strip()
     # The standard report opening (Status / Summary / Left / Next) is for the lead, not the saved map or pitfalls:
-    # kept, it rode into every worker brief (an OpenSkyrim session, 2026-09-28).
+    # kept, it rode into every worker brief (an Project A session, 2026-09-28).
     env = _envelope()
     parsed = env.parse(body) if env else None
     if parsed and parsed.get('head') and parsed['head'] in body:

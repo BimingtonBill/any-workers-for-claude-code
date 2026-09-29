@@ -1,6 +1,6 @@
 # Tracks: keeping coders, read-only workers and Claude busy at once
 
-Measured in OpenSkyrim, 2026-09-22 to 24 (three Claude sessions, ~3,000 Claude tool calls, 138 worker
+Measured in Project A, 2026-09-22 to 24 (three Claude sessions, ~3,000 Claude tool calls, 138 worker
 runs, local transcripts and manifests only):
 
 - Only one worker ran for 59% of the time any worker ran; 55 of Claude's 80 launch batches were a
@@ -31,7 +31,7 @@ hand, and said so.
 
 ## Claude subagents named and recorded like workers (2026-09-25)
 
-OpenSkyrim's panel showed "Build field notes (impl-183)" beside "DeepSeek research #184: ...": a Claude
+Project A's panel showed "Build field notes (impl-183)" beside "DeepSeek research #184: ...": a Claude
 subagent that had taken over DeepSeek impl #183. The user asked for that to be the standard. In a project
 that runs workers, `ds_hook.py` now refuses an Agent call unless its description reads
 `Claude <kind> #<nnn>: <what>`, and gives the corrected name: the task's own number when the description

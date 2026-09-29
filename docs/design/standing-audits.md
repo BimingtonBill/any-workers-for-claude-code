@@ -33,7 +33,7 @@ findings numbered, deduplicated, closed by FIXED lines and by hand; a non-audit 
 diff). The first real checklists for this repository were written by a Claude subagent working from the
 `init` brief, in the report format, and saved with `save checklists`. A DeepSeek audit run through the
 launcher's auto-save is still to be proven (held overnight on 2026-09-24 by the weekly spend pace, to leave
-OpenSkyrim's coders the budget).
+Project A's coders the budget).
 
 ## Review and first real audits (2026-09-24, overnight)
 
@@ -57,11 +57,11 @@ OpenSkyrim's coders the budget).
   spawn_workers launched any .md on disk as a brief) and 2 medium; every one fixed with a regression test,
   or closed with the reason it isn't a bug (WLP-20260924-02). The launcher's auto-save handled every
   DeepSeek run: findings filed and numbered, checklists grown, areas marked audited at the brief's HEAD.
-- OpenSkyrim: `init` proposed 8 areas ($0.045), and the first audit of each ($0.23 for all 8) filed 22
+- Project A: `init` proposed 8 areas ($0.045), and the first audit of each ($0.23 for all 8) filed 22
   findings, 7 of them medium: acceptance scripts pinned to schemas the converter no longer writes, an
   integration report that passes regardless of its own issues, the engine opening the converted database
-  read-write, a whole-file bytecheck on every cache lookup. Two were in harness tools OpenSkyrim copies
-  (HT-20260924-04/05), fixed at the source. The others were handed to OpenSkyrim's sessions.
+  read-write, a whole-file bytecheck on every cache lookup. Two were in harness tools Project A copies
+  (HT-20260924-04/05), fixed at the source. The others were handed to Project A's sessions.
 - Re-audits find more than first audits: the second pass of this repository's areas found 12 new issues
   the first had not. Stopping after two rounds was a judgment call: the second round's findings were
   smaller than the first's.

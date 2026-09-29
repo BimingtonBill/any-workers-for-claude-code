@@ -4,7 +4,7 @@ The launcher calls `watch` every 15 seconds while a worker runs. It reads the wo
 the first time a sign of drift appears, queues a short message in the run folder (nudge.txt):
 
   steps     100, 150 and 200 steps with tools: cost grows with every step, since each re-reads the
-            whole context (the costliest OpenSkyrim coders ran 220-300 steps)
+            whole context (the costliest Project A coders ran 220-300 steps)
   context   200k and 350k tokens of context
   refused   the same kind of shell command refused 3 times: that form isn't allowed, so stop retrying
   sleep     a sleep of 2 minutes or more (coders slept up to 9 minutes on background builds)
@@ -13,7 +13,7 @@ the first time a sign of drift appears, queues a short message in the run folder
             before the fixed counts: a review usually takes about 11 steps, so one at 90 is far off
             track while the fixed nudges would still say nothing
   time      TIME_AT (75%) of the run's -TimeoutMinutes gone: finish the change in hand, run the checks and
-            report now (a DOA MiMo coder was killed at its 90 minutes after writing its files but before
+            report now (a Project B MiMo coder was killed at its 90 minutes after writing its files but before
             reporting, 2026-09-29)
 The worker's own PostToolUse hook runs `deliver` after every tool call: it hands any queued message
 to the worker as added context and clears it, so the worker sees it before its next step. Every nudge

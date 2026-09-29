@@ -4,7 +4,7 @@ Registered by tools/install-skill.ps1 in ~/.claude/settings.json for the Bash an
 
     PreToolUse   a worker launch (ds-agent.ps1, or ds_impl.ps1 starting a coder) is refused unless it
                  runs in the background under a panel description in the house format,
-                 "DeepSeek <kind> #<nnn>: <what>", so the panel says what each entry is. OpenSkyrim's
+                 "DeepSeek <kind> #<nnn>: <what>", so the panel says what each entry is. Project A's
                  panel read "Launch the shadows worker" (2026-09-23), which hides the kind, the number
                  and the project.
     PostToolUse  after a lead starts, Claude is told the exact ds-watch.ps1 -Children command to start

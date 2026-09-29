@@ -1,6 +1,6 @@
 # Goal 1 - Clarity: the run manifest
 
-**Problem.** In the DOA and OpenSkyrim projects a worker was known by a label such as `t72`, `i07`, `c01`,
+**Problem.** In the Project B and Project A projects a worker was known by a label such as `t72`, `i07`, `c01`,
 `review-t67`, `crit124` or `resume-4f3a9c1e`. Nothing outside the lead's head said what `t72` was for, that
 there were two different t72s, that `t81b` was a rerun of `t81`, or which run a `resume-*` continued.
 Failed and timed-out runs were never logged at all (see `docs/lessons.md`).
@@ -63,8 +63,8 @@ Alongside the manifest the launcher keeps `<stateDir>/<label>.json` while a run 
 {
   "schema": "ds-run/1",
   "run_id": "research-085-radial.1", "task_id": "research-085-radial", "attempt": 1,
-  "kind": "research", "title": "Which Xbox function draws the radial menu's ring",
-  "project": "DOA Xbox360 UI", "dir": "C:\\...\\DOA Xbox360 UI",
+  "kind": "research", "title": "Which console function draws the radial menu's ring",
+  "project": "Project B", "dir": "C:\\...\\Project B",
   "parent_run_id": "lead-004-ui-audit.1", "root_run_id": "lead-004-ui-audit.1",
   "lineage": "claude/lead-004-ui-audit.1/research-085-radial.1", "depth": 2,
   "state": "completed",
@@ -109,7 +109,7 @@ set, else the project's `stateDir` from `.deepseek-agents.json`, else `local/age
 
 ## Crashes and dead launchers (2026-09-24)
 
-The OpenSkyrim night of 2026-09-23 showed two gaps. `research-542` finished its work, opened one more
+The Project A night of 2026-09-23 showed two gaps. `research-542` finished its work, opened one more
 large image and died with exit code 1: the partial-report rescue ran only for timeouts, so its report
 was lost. `impl-152`'s launcher died (the machine ran out of memory) and the run stayed `working` for
 ever, so a watcher would have waited on it indefinitely.

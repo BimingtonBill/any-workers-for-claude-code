@@ -61,7 +61,7 @@ the work where quality matters more than volume.
 ## The contributor tier, sanctioned per project
 
 The idea: the contributor tier could be acceptable for an open-source project if it were properly sanctioned to
-stay in that project. Take an open-source game-engine project whose repository is public (Apache-2.0), but whose workers can also read the Skyrim install and the converted assets (Bethesda's data), the
+stay in that project. Take an open-source game-engine project whose repository is public (Apache-2.0), but whose workers can also read the game install and the converted assets (the publisher's data), the
 cargo registry, shared build folders (all `readOnlyDirs`), and `local/` (captures, screenshots, logs, handoffs,
 notes). Only the tracked code is public. So:
 
@@ -219,7 +219,7 @@ The open-source project was opted in to the contributor tier by its owner, in th
 | Design (settings screen) | clean, plainest; 4.9 min | polished, 2 bugs; 15.4 min | tidy and readable, focus ring on one tab while another's content shows; 1.6 min, $0.13 (standard) |
 
 Muse is fast and cheap and the best at screenshots, but as a sole reviewer of a large change it would have passed
-real bugs. The skill makes it OpenSkyrim's contributor-tier worker for research, analysis, audits and second
+real bugs. The skill makes it Project A's contributor-tier worker for research, analysis, audits and second
 reviews beside DeepSeek's; screenshots go to its standard tier; coders stay on DeepSeek until it is tried as one.
 
 ## Separate limits per provider (2026-09-29)

@@ -70,7 +70,7 @@ The outside evidence is mixed. The default was off until the user chose on (2026
   central orchestrator cut that to about 4x. Multi-agent setups lost 39-70% on sequential tasks and gained
   on parallelisable ones.
 - MAST (arXiv 2503.13657): about 37% of multi-agent failures are misalignment between agents.
-- DOA's own best coordination result was a **shared contract file**, not messages:
+- Project B's own best coordination result was a **shared contract file**, not messages:
   `docs/diagnostics/event-schema.md` was the one shape four parallel workers agreed on.
 
 So:

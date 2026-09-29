@@ -282,7 +282,7 @@ sources agree. `websearch-004-limits-check.1` ran under the caps (max_turns 30) 
 
 ## The turn limit is advisory; the timeout is the cap (2026-09-23)
 
-OpenSkyrim's three overnight websearch workers each ran past their limit: `max_turns` 15 against 23, 25
+Project A's three overnight websearch workers each ran past their limit: `max_turns` 15 against 23, 25
 and 19 tool calls, all finishing `ok`. Reproduced here, from a lead (`websearch-001-latest-versions.1`:
 34 tool calls under 15) and without one (`websearch-008-file.1`: 25 under 15). The launcher does pass
 `--max-turns 15` in every case: the dry runs are identical, and `websearch-006-childcap.1` and

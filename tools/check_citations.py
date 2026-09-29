@@ -4,7 +4,7 @@ Research notes and handoff notes are required to cite evidence, and about half o
 engine-internal claims in advisor reports have been wrong. This catches the mechanical
 half of that: a cited file that does not exist, a line past the end of the file, and an
 address that is not inside any function a disassembly export knows about (only when a
-function table exists under local/ - OpenSkyrim has none yet, so addresses are not checked).
+function table exists under local/ - Project A has none yet, so addresses are not checked).
 
   python tools/check_citations.py docs/research/auto-switch.md
   python tools/check_citations.py --since HEAD~1        # every .md changed since a commit
@@ -96,7 +96,7 @@ def build_index(root=ROOT):
     """Map every file name in the repository to the repo-relative paths that carry it.
 
     A bare file name like `CharGen.as:89` is not a usable citation here, because the PC
-    and the Xbox tree both hold one; the index is what turns that into a named warning.
+    and the console tree both hold one; the index is what turns that into a named warning.
     """
     index = {}
     root = Path(root)
@@ -145,7 +145,7 @@ def check_path(path, first, last, root=ROOT, index=None):
     if '/' in clean:
         target = root / clean
         # A worker-written note must not make this read files outside the project ("../../x", or an absolute
-        # path, which pathlib's / would take as the whole path): OpenSkyrim audit finding HT-20260924-05.
+        # path, which pathlib's / would take as the whole path): Project A audit finding HT-20260924-05.
         try:
             target.resolve().relative_to(root.resolve())
         except ValueError:
@@ -169,7 +169,7 @@ def check_path(path, first, last, root=ROOT, index=None):
     if not fitting:
         return 'line %d is past the end of every %s in the repository' % (last, clean), None
     # Several copies only matter when the cited line is not the same in all of them:
-    # two exports of one function are harmless, the PC and Xbox copies of a script are not.
+    # two exports of one function are harmless, the PC and console copies of a script are not.
     if len(fitting) > 1 and len({line_text(root / c, first) for c in fitting}) > 1:
         return None, 'ambiguous: line %d differs between %d files named %s (%s) - cite a repo-relative path' % (
             first, len(fitting), clean, ', '.join(fitting[:3]))

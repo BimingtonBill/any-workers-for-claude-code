@@ -1,6 +1,6 @@
 # The standard work cycle
 
-## Why (OpenSkyrim, 2026-09-24 18:00 to 2026-09-25 midday)
+## Why (Project A, 2026-09-24 18:00 to 2026-09-25 midday)
 
 56 runs (54 DeepSeek, 2 Claude subagents). They were reliable: every finished run completed, only 3 were
 retries, and 46 of 56 reports cited `file:line`. The results were uneven, though:
@@ -57,7 +57,7 @@ retries, and 46 of 56 reports cited `file:line`. The results were uneven, though
 
 A `Claude impl` subagent now runs on Opus: the hook sets `model: "opus"` in its `updatedInput`, unless the
 Claude plan is tight (pace level 2 or more), when the caller's choice stands. Other kinds keep their model.
-It was the user's call after `Claude impl #185` (OpenSkyrim) was sent on Sonnet and took 48 minutes and
+It was the user's call after `Claude impl #185` (Project A) was sent on Sonnet and took 48 minutes and
 172 turns on a renderer bug. Probe `Claude impl #062`, launched with `model: "sonnet"`, ran and was
 recorded as `claude-opus-5-5`. Tests: `tests/test_claude_runs.py`.
 
@@ -65,9 +65,9 @@ recorded as `claude-opus-5-5`. Tests: `tests/test_claude_runs.py`.
 
 The hook found a project's state folder by starting PowerShell (`ds_state.state_dir`, 1.7 s when idle). With
 cargo builds running it passed the hook's 10 s limit, and Claude Code cancelled `SubagentStop` twice, so
-OpenSkyrim's `Claude impl #185` and `#186` stayed `working` after they finished (backfilled from their
+Project A's `Claude impl #185` and `#186` stayed `working` after they finished (backfilled from their
 transcripts). The hook now uses the same rule in Python (`fallback_dir`, 0.014 s, the same folders for
-OpenSkyrim and DOA), and `SubagentStop` has 30 s.
+Project A and Project B), and `SubagentStop` has 30 s.
 
 Checked at the same time, over 81 subagent transcripts: none received the hook's pace or /compact notes,
 none tried to launch DeepSeek workers or delegate despite the delegation level in AGENTS.md, and 9 of
@@ -95,7 +95,7 @@ child. Dry-run tests: `tests/test_launcher_dryrun.py` (web questions, none, miss
 ## Worktree subagents never recorded as finished (2026-09-25 evening)
 
 `SubagentStop` for a subagent started with `isolation: "worktree"` carries the worktree as `cwd`
-(`<project>/.claude/worktrees/agent-<id>`), which has no state dir, so the hook ignored it: 15 of 18 OpenSkyrim
+(`<project>/.claude/worktrees/agent-<id>`), which has no state dir, so the hook ignored it: 15 of 18 Project A
 Claude coding runs since noon stayed `working` although every transcript had finished. `agent_stop` now maps a
 worktree `cwd` back to the project (test: `test_a_worktree_subagent_finishes_too`, which fails without the
 fix), and the 12 finished runs were backfilled from their transcripts.
@@ -109,8 +109,8 @@ From a project session, at the user's request:
   half-hour clock per session (the check runs git, about 0.6 s, so it is not repeated on every call), and says
   to run `ds_memory.py due` and start what it prints. Nothing launches a digest by itself: it costs money, and
   the user chose the reminder (option 1) over a launcher warning or an automatic digest. Tests in
-  `tests/test_ds_claude.py`; on the real projects it was silent for OpenSkyrim (just refreshed) and named
-  DOA's map as due. Notes are no longer added to a subagent's own tool calls (events with `agent_id`).
+  `tests/test_ds_claude.py`; on the real projects it was silent for Project A (just refreshed) and named
+  Project B's map as due. Notes are no longer added to a subagent's own tool calls (events with `agent_id`).
 - `websearch-718-fun-sky-weather.1` finished in one turn with no web calls and invented links. The launcher
   now counts WebSearch/WebFetch calls in a websearch run; with none, it puts a warning at the top of the report,
   prints a note, and records `web_calls: 0` in the manifest. Probe `websearch-064-no-web-probe` (a brief that

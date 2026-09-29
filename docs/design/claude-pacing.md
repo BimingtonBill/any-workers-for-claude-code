@@ -3,7 +3,7 @@
 ## Why
 
 DeepSeek spend is paced (`spend-limit.md`); Claude's own plan was not. On the night of 2026-09-24/25 the
-$20/week DeepSeek limit held coders from 01:15, and the OpenSkyrim sessions did the work themselves, as the
+$20/week DeepSeek limit held coders from 01:15, and the Project A sessions did the work themselves, as the
 skill told them to: 35 Claude subagents at 80-180k tokens each, 81 edits of their own, 72 commits. The
 account hit its 5-hour limit, and by morning most of the weekly all-models window was used with nearly four days
 left. The DeepSeek limit didn't reduce the work; it moved it onto the scarcer budget. Long sessions added to

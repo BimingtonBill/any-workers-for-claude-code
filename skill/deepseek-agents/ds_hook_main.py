@@ -60,7 +60,7 @@ def worker_state(cwd):
         return None
     try:
         # The rule in Python: state_dir() starts PowerShell (1.7 s idle), and under a cargo build that passed
-        # the hook's 10 s limit, so OpenSkyrim's impl #185 was never recorded as finished (2026-09-25).
+        # the hook's 10 s limit, so Project A's impl #185 was never recorded as finished (2026-09-25).
         sd = Path(ds_state.fallback_dir(Path(cwd))).resolve()
         root = Path(cwd).resolve()
     except Exception:
@@ -92,7 +92,7 @@ def coding_model(kind, asked):
     Sonnet 5.5 (Intelligence Index 56 against Opus 5.5's 58 and DeepSeek V4.1 Flash's 40; Terminal-Bench 4.0
     64% against Opus's 60%) takes over Claude's reading, review and design helpers and coding. It replaced
     Opus for coders, which had been set on 2026-09-25 after impl #185 on Sonnet 5 spent 48 minutes and 172
-    turns on a renderer bug. A caller that names a model keeps it. The user's rule (2026-09-29, from the DOA session, where a hard reverse-engineering job
+    turns on a renderer bug. A caller that names a model keeps it. The user's rule (2026-09-29, from the Project B session, where a hard reverse-engineering job
     had been sent to Opus): Sonnet 5.5 unless Sonnet has already failed at the task; Opus only after that, or when the
     user asks. None
     means leave the model alone."""
@@ -251,7 +251,7 @@ def agent_post(event):
 def agent_stop(event):
     """A background subagent recorded by agent_post has stopped: finish its run."""
     # A subagent started with isolation "worktree" stops in <project>/.claude/worktrees/agent-<id>, which has no
-    # state dir: every OpenSkyrim coding subagent on 2026-09-25 afternoon stayed "working" for this reason.
+    # state dir: every Project A coding subagent on 2026-09-25 afternoon stayed "working" for this reason.
     sd = worker_state(re.sub(r'[\\/]\.claude[\\/]worktrees[\\/].*$', '', str(event.get('cwd') or '')))
     if sd is None or not event.get('agent_id'):
         return
@@ -350,7 +350,7 @@ def claude_note(event, now=None):
         if parts:
             seen[sid] = now
     # Worker memory, on its own clock (the check runs git, about 0.6 s): the morning report says it only at
-    # session start, and OpenSkyrim's sessions ran for days while the map fell 226 commits behind (2026-09-26).
+    # session start, and Project A's sessions ran for days while the map fell 226 commits behind (2026-09-26).
     mem_key = 'memory:' + sid
     checked = False
     if now - float(seen.get(mem_key) or 0) >= NOTE_EVERY:
@@ -499,7 +499,7 @@ OPTION_WITH_VALUE = re.compile(r'^(-[ksnuC]|--(signal|kill-after|adjustment|unse
 
 def _strip_wrappers(words):
     """The words after any VAR=value prefixes and wrappers that run the rest of the line, and the seconds a
-    `timeout` wrapper allows (None when there is none). `timeout 10800 powershell -File ...` went unchecked (a DOA
+    `timeout` wrapper allows (None when there is none). `timeout 10800 powershell -File ...` went unchecked (a Project B
     MiMo launch, 2026-09-29), since `timeout` is not a shell."""
     limit = None
     while words:
@@ -561,7 +561,7 @@ def timeout_wrapper(cmd):
 
 
 def timeout_refusal(seconds):
-    """Why a launch wrapped in `timeout` is refused, with the -TimeoutMinutes that stands in for it. A DOA MiMo
+    """Why a launch wrapped in `timeout` is refused, with the -TimeoutMinutes that stands in for it. A Project B MiMo
     worker started as `timeout 5400 powershell -File ds-agent.ps1 ...` hit the 90 minutes after writing its files
     but before reporting (2026-09-29): the killed launcher recorded it as canceled, with no report and no warning."""
     minutes = max(1, int(-(-seconds // 60)))
