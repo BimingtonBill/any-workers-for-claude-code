@@ -79,25 +79,35 @@ KEY, LEGACY_KEY = 'delegationLevel', 'delegation'
 ENV, LEGACY_ENV = 'DS_DELEGATION_LEVEL', 'DS_DELEGATION'
 
 
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    from ds_state import project_root  # noqa: E402  (beside this file, in the harness and installed)
+except ImportError:     # this tool copied alone into a project's tools/: DS_PROJECT or the folder above tools/
+    def project_root(tools_dir):
+        return Path(os.environ.get('DS_PROJECT') or Path(tools_dir).resolve().parent).resolve()
+
+
 def _project_root():
-    """The project these tools act on. Run from the DeepSeek Workers harness or the installed skill,
-    that is DS_PROJECT or the current folder. Copied into a project's tools/, it is DS_PROJECT or the
-    folder above tools/, wherever it is run from."""
-    if os.environ.get('DS_PROJECT'):
-        return Path(os.environ['DS_PROJECT']).resolve()
-    here = Path(__file__).resolve().parents[1]
-    # The harness (launcher/ds-agent.ps1) or the installed skill (ds-agent.ps1 beside tools/): act on
-    # the folder it is run from. Anywhere else, the tools sit in a project's tools/: act on that project.
-    if (here / 'launcher' / 'ds-agent.ps1').exists() or (here / 'ds-agent.ps1').exists():
-        return Path(os.getcwd()).resolve()
-    return here
+    """The project these tools act on (ds_state.project_root)."""
+    return project_root(Path(__file__).resolve().parent)
+
+
+try:        # launcher/ds_common.py: in the harness beside tools/'s parent, installed in the skill folder
+    import ds_state  # noqa: E402
+    ds_state.use_launcher()
+    from ds_common import read_json  # noqa: E402
+except (ImportError, AttributeError):     # this tool copied alone into a project's tools/
+    def read_json(path, default=None):
+        try:
+            return json.loads(Path(path).read_text(encoding='utf-8-sig'))
+        except (OSError, ValueError):
+            return default
 
 
 def _read_json(path):
-    try:
-        return json.loads(Path(path).read_text(encoding='utf-8'))
-    except (OSError, ValueError):
-        return None
+    """A JSON file's content, or None when it is missing or not JSON."""
+    return read_json(path, None)
 
 
 def _valid(value):

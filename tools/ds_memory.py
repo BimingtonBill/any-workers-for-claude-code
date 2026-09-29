@@ -33,6 +33,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import ds_state  # noqa: E402
 from ds_state import state_dir as _state_dir  # noqa: E402
 
 _dirs = {}
@@ -73,9 +74,20 @@ def meta(d):
         return {}
 
 
+try:        # launcher/ds_common.py: in the harness beside tools/'s parent, installed in the skill folder
+    ds_state.use_launcher()
+    from ds_common import write_json_atomic  # noqa: E402
+except (ImportError, AttributeError):     # copied alone beside an older launcher: a plain temp file and replace
+    def write_json_atomic(path, data, indent=2):
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name('%s.%d.tmp' % (path.name, os.getpid()))
+        tmp.write_text(json.dumps(data, indent=indent) + '\n', encoding='utf-8')
+        os.replace(str(tmp), str(path))
+
+
 def save_meta(d, m):
-    d.mkdir(parents=True, exist_ok=True)
-    (d / 'memory.json').write_text(json.dumps(m, indent=1), encoding='utf-8')
+    write_json_atomic(d / 'memory.json', m)
 
 
 def launcher():
@@ -225,7 +237,28 @@ def reviews_since(project, since):
 def report_body(path):
     text = Path(path).read_text(encoding='utf-8', errors='replace')
     lines = [x for x in text.splitlines() if not x.startswith('<!-- ') and not x.startswith('[ds-agent] run=')]
-    return '\n'.join(lines).strip()
+    body = '\n'.join(lines).strip()
+    # The standard report opening (Status / Summary / Left / Next) is for the lead, not the saved map or pitfalls:
+    # kept, it rode into every worker brief (an OpenSkyrim session, 2026-09-28).
+    env = _envelope()
+    parsed = env.parse(body) if env else None
+    if parsed and parsed.get('head') and parsed['head'] in body:
+        body = body.replace(parsed['head'], '', 1).strip()
+    return body
+
+
+def _envelope():
+    """launcher/ds_envelope.py: beside tools/ once installed, in launcher/ in the harness."""
+    here = Path(__file__).resolve().parent
+    for folder_ in (here.parent / 'launcher', here.parent):
+        if (folder_ / 'ds_envelope.py').is_file():
+            sys.path.insert(0, str(folder_))
+            try:
+                import ds_envelope
+                return ds_envelope
+            except ImportError:
+                return None
+    return None
 
 
 # --- Briefs ---
@@ -281,7 +314,7 @@ def brief_pitfalls(project):
     if pilot.is_file():
         for line in pilot.read_text(encoding='utf-8', errors='replace').splitlines()[1:]:
             cells = line.split(',')
-            if len(cells) > 9 and cells[9] and cells[9] not in ('pending-review', 'accepted', 'integrated') and (not since or cells[0] > since[:19]):
+            if len(cells) > 9 and cells[9] and cells[9] not in ('pending-review', 'accepted', 'integrated', 'held') and (not since or cells[0] > since[:19]):
                 failed.append('%s: %s %s' % (cells[1], cells[9], ','.join(cells[12:]).strip()))
     parts = ['# Goal', 'Turn what reviews found in this project into a short list of pitfalls: rules every coder should know '
              'before starting, so the same mistakes stop coming back.', '',
@@ -317,6 +350,7 @@ def save(project, which, run_id):
     if len(body) < 200:
         raise SystemExit('that report is too short to be a %s (%d characters); not saved' % (which, len(body)))
     now = dt.datetime.now().isoformat(timespec='seconds')
+    d.mkdir(parents=True, exist_ok=True)
     if which == 'map':
         (d / 'map.md').write_text(body + '\n', encoding='utf-8')
         m['map'] = dict(commit=m.pop('map_pending', None) or git(project, 'rev-parse', 'HEAD'), saved=now, run_id=run_id)

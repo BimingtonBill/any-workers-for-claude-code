@@ -45,12 +45,21 @@ $deadline = (Get-Date).AddMinutes($TimeoutMinutes)
 $watchStart = Get-Date
 $warnedMissing = $false
 
-# Latest record per run id, in start order.
-function Get-Runs {
+# Latest record per run id, in start order, among the records that name one of $Ids. Parsing every line took
+# about 290 ms per poll on a 1.6 MB manifest, which only grows, so a plain text test comes first: a run's own
+# records hold its run id and task id, and a lead's workers hold the lead's run id as their parent_run_id, so
+# every record the watcher reads still gets through. Resolve-Run and the kids filter still match exact fields.
+function Get-Runs([string[]]$Ids) {
     $runs = [ordered]@{}
     if (-not (Test-Path -LiteralPath $manifest)) { return $runs }
+    $Ids = @($Ids | Where-Object { $_ })
     foreach ($line in [IO.File]::ReadAllLines($manifest, $utf8)) {
         if (-not $line.Trim()) { continue }
+        if ($Ids) {
+            $named = $false
+            foreach ($id in $Ids) { if ($line.IndexOf($id, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $named = $true; break } }
+            if (-not $named) { continue }
+        }
         try { $r = $line | ConvertFrom-Json } catch { continue }
         if ($r.run_id) { $runs[$r.run_id] = $r }
     }
@@ -103,7 +112,7 @@ $self = $PSCommandPath -replace '\\', '/'
 if ($Children) {
     $knownList = @($Known -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
     while ($true) {
-        $runs = Get-Runs
+        $runs = Get-Runs @($Children)
         $script:allRuns = $runs
         $lead = Resolve-Run $runs $Children
         if (-not $lead) {
@@ -139,7 +148,7 @@ if ($Children) {
 
 # -Run: wait for one run to end, then show how it went.
 while ($true) {
-    $r = Resolve-Run (Get-Runs) $Run
+    $r = Resolve-Run (Get-Runs @($Run)) $Run
     if ($r -and (Test-Ended $r)) { break }
     if ((Get-Date) -gt $deadline) {
         "[ds-watch] gave up after $TimeoutMinutes minutes; $Run is $(if ($r) { $r.state } else { 'not in the manifest' }). The worker itself keeps running."

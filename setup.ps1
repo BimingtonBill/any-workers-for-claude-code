@@ -1,4 +1,4 @@
-# One-step setup for DeepSeek agents for Claude Code.
+# One-step setup for Any Workers for Claude Code.
 #   powershell -NoProfile -ExecutionPolicy Bypass -File setup.ps1
 #
 # Run from the unzipped kit. It:
@@ -19,7 +19,7 @@ $here = $PSScriptRoot
 function Say([string]$Text, [string]$Color = 'Gray') { Write-Host $Text -ForegroundColor $Color }
 
 Say ''
-Say 'DeepSeek agents for Claude Code: setup' 'Cyan'
+Say 'Any Workers for Claude Code: setup' 'Cyan'
 Say ''
 
 # 1. The skills.

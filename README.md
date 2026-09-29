@@ -9,8 +9,9 @@ Python script, a game, a Rust or .NET app.
 A typical worker task costs a few cents and a big one up to about 20 cents, so a $5 DeepSeek top-up goes a
 long way.
 
-Workers run on DeepSeek today; other model providers (Meta's Muse Spark, Xiaomi's MiMo) are being tested for a
-later release. Formerly "DeepSeek agents for Claude Code".
+Workers run on DeepSeek by default. Meta's Muse Spark and Xiaomi's MiMo can run workers too (`-Provider meta`,
+`-Provider xiaomi`, with their own keys, limits and pacing); see `docs/design/providers.md`. Formerly "DeepSeek
+agents for Claude Code".
 
 *An independent community project, not made or endorsed by Anthropic, DeepSeek, Meta or Xiaomi.*
 
@@ -96,14 +97,14 @@ to 4 for this project"*) or with `/delegation 4`.
 
 ## Budgets
 
-There's no DeepSeek limit until you set one. Tell Claude in any session, and it applies everywhere:
+There's no limit until you set one, and each provider has its own. Tell Claude in any session, and it applies everywhere:
 
 - *"Limit DeepSeek to $2 a day."*: a daily or weekly limit, like Claude's own usage limits.
 - *"Make my DeepSeek credit last two weeks."*: each day gets an even share of what's left.
 - *"Stop any DeepSeek worker at $1.50."*: a cap per worker, which keeps what it had found.
 
 Spending is paced like cruise control: when it runs ahead, workers ease off step by step before the limit is
-reached. A worker that won't fit doesn't start, and Claude does the work itself. Claude tells you when your
+reached. A worker that won't fit doesn't start: Claude runs the same work as a Sonnet helper instead. Claude tells you when your
 credit is very low. Spend figures are estimates at DeepSeek's list prices; the DeepSeek dashboard is the real
 bill.
 
@@ -121,8 +122,8 @@ It suggests `/compact` when a conversation is 70% full, since every message re-r
   the web can only change a separate copy.
 - **If a job needs a program you don't have**, Claude asks you to install it rather than working around it.
 - **It adds a hook to Claude Code** (in `~/.claude/settings.json`, backed up first). It names workers and
-  Claude's own helpers in the Background tasks panel and records them, runs Claude's coding helpers on its
-  strongest model unless your plan is running low, and adds short notes for Claude about budgets. It changes
+  Claude's own helpers in the Background tasks panel and records them, runs Claude's helpers on Sonnet 5.5 unless
+  a session names another model, and adds short notes for Claude about budgets. It changes
   nothing else. Install with `tools/install-skill.ps1 -NoHooks` to skip it, or delete the entries that
   mention `ds_hook.py` to remove it.
 

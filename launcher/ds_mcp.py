@@ -31,7 +31,7 @@ def _max_coders():
     .deepseek-agents.json, else 1. Each coder gets its own worktree and build (about 11 GB seeded for
     OpenSkyrim), and overlapping builds ran the machine out of memory on 2026-09-23."""
     try:
-        value = int(json.loads((Path(WORK_DIR) / '.deepseek-agents.json').read_text(encoding='utf-8')).get('leadCoders') or 1)
+        value = int(json.loads((Path(WORK_DIR) / '.deepseek-agents.json').read_text(encoding='utf-8-sig')).get('leadCoders') or 1)
     except (OSError, ValueError, TypeError, AttributeError):
         value = 1
     return max(1, min(value, 6))
@@ -72,7 +72,7 @@ if 'wait' in ENABLED:
 if 'spawn' in ENABLED:
     TOOLS.append({
         'name': 'write_brief',
-        'description': ('Save a brief for a DeepSeek worker you will launch with spawn_workers. name is '
+        'description': ('Save a brief for a worker you will launch with spawn_workers. name is '
                         '<kind>-<nnn>-<slug> with kind one of %s and nnn a three-digit number you assign in order '
                         '(001, 002, ...), e.g. research-001-rc-rule; the worker\'s run id will be <name>.1. '
                         'content is the whole brief in Markdown with # Goal, # Context, # Scope, # Done when and '
@@ -82,7 +82,7 @@ if 'spawn' in ENABLED:
     })
     TOOLS.append({
         'name': 'spawn_workers',
-        'description': ('Launch up to 6 DeepSeek workers in parallel from briefs saved with write_brief, wait '
+        'description': ('Launch up to 6 workers in parallel from briefs saved with write_brief, wait '
                         'for all of them, and return each report under its run id. Workers run read-only in '
                         'your working directory. impl-* briefs run as coders instead (one per call unless the project allows more): each '
                         'in its own git worktree under local/impl/<name>, followed by a scope check and its '
@@ -92,7 +92,7 @@ if 'spawn' in ENABLED:
         'inputSchema': {'type': 'object', 'properties': {
             'briefs': {'type': 'array', 'items': {'type': 'string'}, 'description': 'brief names given to write_brief'},
             'crosstalk': {'type': 'boolean', 'description': 'let the workers message each other; default true'},
-            'effort': {'type': 'string', 'enum': ['low', 'high', 'max'], 'description': 'DeepSeek thinking depth; default high'},
+            'effort': {'type': 'string', 'enum': ['low', 'high', 'max'], 'description': 'how hard the workers think, where their model offers a choice; default high'},
             'max_turns': {'type': 'integer', 'minimum': 5, 'maximum': 200},
         }, 'required': ['briefs']},
     })
@@ -138,6 +138,21 @@ def content_problem(brief, content):
                 'a command as background, write it without backticks. Work that must run commands '
                 'belongs in an impl- brief (a coder in its own worktree) or with Claude.' % ', '.join(runs))
     return None
+
+
+def outcome(code):
+    """(failed, note) for the exit code of a spawn_workers child. 1 is not a failure of the call: ds-spawn.ps1
+    exits 1 when any of its workers failed and ds_impl.ps1 when a coder's acceptance failed or it never ran,
+    and both still print every report, so the text already says what went wrong. ds-agent.ps1's own codes
+    are 3 (timed out) and 4 (held by the spend limit or pace): ds-spawn.ps1 passes one on when every worker it
+    ran got it, and ds_impl.ps1 passes on its coder's. Any other non-zero code is a failure."""
+    if code in (0, 1):
+        return False, ''
+    if code == 3:
+        return True, 'timed out and was stopped (exit code 3)'
+    if code == 4:
+        return True, 'held by the budget or pace (exit code 4): do it yourself or wait'
+    return True, 'failed (exit code %s)' % code
 
 
 def call(name, args):
@@ -217,8 +232,11 @@ def call(name, args):
             out = '\n'.join(l for l in out.splitlines() if not l.startswith('[claude-code:unrecognized_model]')).strip()
             if label != 'readers':
                 out = ('=== coder %s (worktree local/impl/%s; Claude reviews and integrates it) ===\n' % (label, label)) + (out or '(no output)')
+            bad, note = outcome(proc.returncode)
+            if note:
+                out += '\n[dsw] %s %s' % ('the workers' if label == 'readers' else 'coder ' + label, note)
             parts.append(out)
-            failed = failed and proc.returncode not in (0, 1)
+            failed = failed and bad
         return text('\n\n'.join(p for p in parts if p) or '(no output)', failed)
     return text('unknown tool %s' % name, True)
 

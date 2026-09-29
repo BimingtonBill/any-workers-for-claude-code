@@ -1,0 +1,123 @@
+{
+  "_about": "Model providers a worker can run on. Prices are US dollars per million tokens. The launcher's default is deepseek, and its entry reproduces the harness's behaviour before providers existed. User overrides and opt-ins go in ~/.claude-deepseek/providers.json, never in a project.",
+  "default": "deepseek",
+  "providers": {
+    "deepseek": {
+      "name": "DeepSeek",
+      "short": "DeepSeek",
+      "baseUrl": "https://api.deepseek.com/anthropic",
+      "auth": "api_key",
+      "keyEnv": "DEEPSEEK_API_KEY",
+      "model": "deepseek-flash[1m]",
+      "smallModel": "deepseek-flash",
+      "efforts": {
+        "low": "low",
+        "medium": "high",
+        "high": "high",
+        "xhigh": "max",
+        "max": "max"
+      },
+      "maxOutputTokens": 128000,
+      "autoCompactWindow": 786432,
+      "balanceUrl": "https://api.deepseek.com/user/balance",
+      "keyPage": "platform.deepseek.com",
+      "prices": {
+        "cache_read": 0.028,
+        "fresh_in": 0.28,
+        "cache_write": 0.28,
+        "out": 0.42
+      }
+    },
+    "meta": {
+      "name": "Meta Muse Spark",
+      "short": "Muse",
+      "baseUrl": "https://api.meta.ai",
+      "auth": "auth_token",
+      "keyEnv": "META_MODEL_API_KEY",
+      "model": "muse-spark-1.3",
+      "smallModel": "muse-spark-1.3",
+      "efforts": null,
+      "maxOutputTokens": 128000,
+      "env": {
+        "ENABLE_TOOL_SEARCH": "false"
+      },
+      "keyPage": "dev.meta.ai",
+      "prices": {
+        "cache_read": 0.15,
+        "fresh_in": 1.25,
+        "cache_write": 1.25,
+        "out": 4.25
+      },
+      "tiers": {
+        "contributor": {
+          "trainsOnPrompts": true,
+          "prices": {
+            "cache_read": 0.002,
+            "fresh_in": 0.1,
+            "cache_write": 0.1,
+            "out": 0.2
+          },
+          "model": "muse-spark-1.3-contributor",
+          "smallModel": "muse-spark-1.3-contributor"
+        }
+      },
+      "unverified": "Contributor is its own model name on the same key (dev.meta.ai/models/muse-spark, 2026-09-27); the max reasoning level is Standard-only. Effort support, rate limits, speed and availability in Australia: check with a key."
+    },
+    "xiaomi": {
+      "name": "Xiaomi MiMo",
+      "short": "MiMo",
+      "baseUrl": "https://api.xiaomimimo.com/anthropic",
+      "auth": "auth_token",
+      "keyEnv": "MIMO_API_KEY",
+      "model": "mimo-v2.6-pro",
+      "smallModel": "mimo-v2.6-flash",
+      "efforts": null,
+      "maxOutputTokens": 128000,
+      "keyPage": "platform.xiaomimimo.com",
+      "prices": {
+        "cache_read": 0.0036,
+        "fresh_in": 0.435,
+        "cache_write": 0.435,
+        "out": 0.87
+      },
+      "unverified": "Token Plan: its allowance and how it counts usage are shown only in the console; spend records it at $0, so the dollar limits do not cover it.",
+      "tiers": {
+        "token-plan": {
+          "keyEnv": "MIMO_TOKEN_PLAN_KEY",
+          "baseUrl": "https://token-plan-sgp.xiaomimimo.com/anthropic",
+          "baseUrls": [
+            "https://token-plan-sgp.xiaomimimo.com/anthropic",
+            "https://token-plan-ams.xiaomimimo.com/anthropic",
+            "https://token-plan-cn.xiaomimimo.com/anthropic"
+          ],
+          "subscription": true,
+          "prices": {
+            "cache_read": 0,
+            "fresh_in": 0,
+            "cache_write": 0,
+            "out": 0
+          },
+          "allowance": {
+            "unit": "credits",
+            "period": "month",
+            "plans": {
+              "lite": 4100000000.0,
+              "standard": 11000000000.0,
+              "pro": 38000000000.0,
+              "max": 82000000000.0
+            },
+            "rates": {
+              "cache_read": 2.5,
+              "fresh_in": 300,
+              "cache_write": 300,
+              "out": 600
+            },
+            "source": "mimo.mi.com/docs/en-US/price/token-plan (2026-09-27): monthly credits per plan; mimo-v2.6-pro credits per token (flash is cheaper, so counting at pro rates errs safe). Exhausted: service suspended until renewal."
+          }
+        }
+      },
+      "avoidImages": true,
+      "role": "Occasional background second opinions only, where speed does not matter (2026-09-27 comparison: review quality like DeepSeek but 1.5-4x slower; its content filter refused an ordinary engine review; images through Claude Code were slow and mixed up). DeepSeek stays the main worker."
+    }
+  }
+}

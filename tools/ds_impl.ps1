@@ -15,6 +15,10 @@
 #
 # The worktree is left in place for review. Nothing is committed to master by the worker:
 # the lead integrates with -Integrate after reading the diff.
+#
+# Exit code: 0 accepted; 1 acceptance failed or the worker did not run; 2 bad arguments; 3 the worker timed out
+# and 4 it was held by the budget or pace (ds-agent.ps1's own codes, passed on; pilot.csv records them as
+# timed-out and held).
 [CmdletBinding()]
 param(
     [string]$Brief,
@@ -33,8 +37,21 @@ param(
     [switch]$NoSeed,                      # Rust: start the task's target/ empty instead of copying the lead's
     [string]$WebDomains,                  # comma-separated domains the worker may fetch; its edits stay in the worktree for review
     [switch]$Force                        # with -Integrate: copy even a file master has changed since the worker's base
+    ,[string]$Provider = ''                # the coder's model provider (launcher/providers.json); default deepseek
+    ,[string]$Tier = ''                    # a provider tier, e.g. contributor (opted-in projects only)
 )
 $ErrorActionPreference = 'Stop'
+# Every native call (git, robocopy, cmd, a child powershell) goes through this. Under 'Stop', Windows PowerShell
+# 5.1 turns a line the program writes to stderr into a terminating error when stderr is redirected, which kills
+# this runner. The block runs under 'Continue', stderr lines captured with 2>&1 come back as plain text, and
+# $LASTEXITCODE is the program's own.
+function Invoke-Native([scriptblock]$Block) {
+    $nativeEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & $Block | ForEach-Object { if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.ToString() } else { $_ } }
+    } finally { $ErrorActionPreference = $nativeEap }
+}
 # Where this runs. From the DeepSeek Workers harness (launcher\ds-agent.ps1 beside tools\): the project is
 # DS_PROJECT or the current folder, and the launcher is the harness's. Copied into a project's tools\: the
 # project is DS_PROJECT or the folder above tools\, and the launcher is the installed skill's.
@@ -104,7 +121,7 @@ function Set-TaskTarget([string]$Worktree, [switch]$Seed) {
         # /R:0 /W:0: a locked file is skipped, not retried. robocopy's defaults (/R:1000000 /W:30) turned one
         # file held by the lead's own build into a 50-minute stall (OpenSkyrim impl-166, 2026-09-24). The seed
         # is only a warm cache: cargo rebuilds whatever is missing.
-        $out = @(& robocopy.exe $profile.FullName (Join-Path $target $profile.Name) /E /MT:16 /R:0 /W:0 /XD incremental /NFL /NDL /NJH /NJS /NP)
+        $out = @(Invoke-Native { & robocopy.exe $profile.FullName (Join-Path $target $profile.Name) /E /MT:16 /R:0 /W:0 /XD incremental /NFL /NDL /NJH /NJS /NP })
         $code = $LASTEXITCODE
         $skipped = @($out | Where-Object { $_ -match 'ERROR \d+ \(0x' }).Count   # one such line per file not copied
         $secs = [int]((Get-Date) - $t0).TotalSeconds
@@ -145,13 +162,13 @@ function Get-LinkNames {
 }
 function Get-TaskLinks {
     @(Get-LinkNames | Where-Object { Test-Path -LiteralPath (Join-Path $root $_) -PathType Container } | Where-Object {
-        & git -C $root check-ignore -q -- $_ 2>$null; $LASTEXITCODE -eq 0 })
+        $linkName = $_; Invoke-Native { & git -C $root check-ignore -q -- $linkName 2>$null }; $LASTEXITCODE -eq 0 })
 }
 function Add-TaskLinks([string]$Worktree) {
     foreach ($n in Get-TaskLinks) {
         $dst = Join-Path $Worktree $n
         if (Test-Path -LiteralPath $dst) { continue }
-        & cmd.exe /c mklink /J "$dst" "$(Join-Path $root $n)" | Out-Null
+        Invoke-Native { & cmd.exe /c mklink /J "$dst" "$(Join-Path $root $n)" } | Out-Null
         if ($LASTEXITCODE -eq 0) { "[ds-impl] linked $n from the main checkout (read-only for the coder)" }
         else { "[ds-impl] could not link ${n}; tests that need it will fail in the worktree" }
     }
@@ -166,9 +183,9 @@ function Remove-TaskLinks([string]$Worktree) {
 # local/ holds worktrees and run records. In a project that doesn't ignore it, keep it out of git through the
 # clone's own .git/info/exclude, which changes no tracked file.
 function Set-LocalIgnored {
-    & git -C $root check-ignore -q -- 'local/impl' 2>$null
+    Invoke-Native { & git -C $root check-ignore -q -- 'local/impl' 2>$null }
     if ($LASTEXITCODE -eq 0) { return }
-    $common = (& git -C $root rev-parse --path-format=absolute --git-common-dir 2>$null)
+    $common = (Invoke-Native { & git -C $root rev-parse --path-format=absolute --git-common-dir 2>$null })
     if (-not $common) { $global:LASTEXITCODE = 0; return }
     $exclude = Join-Path $common.Trim() 'info\exclude'
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $exclude) | Out-Null
@@ -209,7 +226,8 @@ if ($List) {
     Get-ChildItem $implRoot -Directory | ForEach-Object {
         $meta = Join-Path $_.FullName '.ds-impl.json'
         $info = if (Test-Path $meta) { Get-Content $meta -Raw | ConvertFrom-Json } else { $null }
-        $dirty = @(& git -C $_.FullName status --porcelain 2>$null) -join "`n"
+        $taskDir = $_.FullName
+        $dirty = @(Invoke-Native { & git -C $taskDir status --porcelain 2>$null }) -join "`n"
         [pscustomobject]@{
             Task = $_.Name
             Base = if ($info) { $info.base.Substring(0, 7) } else { '?' }
@@ -224,7 +242,7 @@ if ($Discard) {
     $path = Join-Path $implRoot $Discard
     if (-not (Test-Path $path)) { Fail "no such task: $Discard" }
     Remove-TaskLinks $path
-    & git -C $root worktree remove --force $path
+    Invoke-Native { & git -C $root worktree remove --force $path }
     "[ds-impl] discarded $Discard"
     exit 0
 }
@@ -250,7 +268,7 @@ if ($Integrate) {
     } else {
         "[ds-impl] check: acceptance - no pilot.csv row found for $Integrate; nothing recorded to check"
     }
-    $acceptanceFailed = $lastRow -and ($lastRow.outcome -in @('failed', 'launch-failed'))
+    $acceptanceFailed = $lastRow -and ($lastRow.outcome -in @('failed', 'launch-failed', 'timed-out', 'held'))
     if ($acceptanceFailed -and -not $Force) {
         Fail "$Integrate's last recorded acceptance did not pass (outcome=$($lastRow.outcome)); refusing to integrate broken work. Fix it and re-run -Post $Integrate, or pass -Force to copy it anyway: -Integrate $Integrate -Force"
     }
@@ -311,7 +329,7 @@ if ($Integrate) {
         # list, not only the ones its brief calls owned: both losses above were one-line changes to
         # files the worker did not own, which is why nobody was watching them.
         if (-not $Force -and (Test-Path -LiteralPath $to)) {
-            $sinceBase = @(& git -C $root diff --name-only "$($info.base)" -- $file 2>$null)
+            $sinceBase = @(Invoke-Native { & git -C $root diff --name-only "$($info.base)" -- $file 2>$null })
             # If git can't compare (the base commit is gone after a rebase), treat the file as changed rather
             # than overwrite master's version unchecked (review-049).
             if ($LASTEXITCODE -ne 0 -or $sinceBase) { $moved += $file; $global:LASTEXITCODE = 0; continue }
@@ -398,7 +416,9 @@ if ($fromLead) {
     }
 }
 
-$baseCommit = (& git -C $root rev-parse $Base).Trim()
+$baseCommit = [string](Invoke-Native { & git -C $root rev-parse $Base })
+if ($LASTEXITCODE -ne 0 -or -not $baseCommit.Trim()) { Fail "git could not resolve the base '$Base' in $root" }
+$baseCommit = $baseCommit.Trim()
 $work = Join-Path $implRoot $Name
 
 # Size check before any money is spent. How big the owned files are predicts a coder's length far better
@@ -417,6 +437,15 @@ $sizeNote = if ($ownedLines -gt 8000) {
 } else { $null }
 if ($sizeNote) { "[ds-impl] size: $sizeNote" }
 
+# A run folder the brief names (a review to fix: local/agents/runs/<run id>/report.md) is added read-only. The
+# worktree has no local/, and the project's is outside the coder's reach, so one could not read the review it was
+# fixing (DOA, 2026-09-29). Only the named runs of this project's own state folder, and only ones that exist.
+$runFolders = @()
+foreach ($m in [regex]::Matches($briefText, '(?i)agents[\\/]runs[\\/]([A-Za-z0-9][A-Za-z0-9._-]*)')) {
+    $folder = Join-Path (Join-Path $stateDir 'runs') ($m.Groups[1].Value.TrimEnd('.'))
+    if ((Test-Path -LiteralPath $folder -PathType Container) -and $runFolders -notcontains $folder) { $runFolders += $folder }
+}
+
 if ($DryRun) {
     "project:  $root$(if ($inHarness) { ' (run from the harness)' } elseif ($inSkill) { ' (run from the installed skill)' } else { ' (tools in the project)' })"
     "launcher: $agent"
@@ -428,13 +457,14 @@ if ($DryRun) {
     "size:     $ownedLines lines in owned files$(if (-not $sizeNote) { ' (small enough)' })"
     "kinds:    $(if ($ecosystems) { $ecosystems -join ', ' } else { '(none detected: python only, plus the acceptance commands)' })"
     "links:    $(if ($l = Get-TaskLinks) { $l -join ', ' } else { '(none)' })"
+    foreach ($folder in $runFolders) { "run read: $folder" }
     exit 0
 }
 
 if (Test-Path $work) { Fail "$Name already exists: review it, then -Integrate or -Discard it" }
 Set-LocalIgnored
 New-Item -ItemType Directory -Force -Path $implRoot | Out-Null
-& git -C $root worktree add --detach $work $baseCommit | Out-Null
+Invoke-Native { & git -C $root worktree add --detach $work $baseCommit } | Out-Null
 if (-not (Test-Path $work)) { Fail 'git worktree add failed' }
 
 # Task-scoped permissions: the shared protections, minus the paths this task owns.
@@ -452,10 +482,11 @@ $scoped = [ordered]@{
     # A worktree has no local/ (it is git-ignored), so the lead's data folders are added
     # read-only: run artifacts, reference screenshots, converted asset samples. Not local/
     # itself - the checkouts live under local/impl, and a deny rule there would forbid the
-    # worker to write its own files - and not local/agents, which is worker bookkeeping.
+    # worker to write its own files - and not local/agents, which is worker bookkeeping, apart from the
+    # run folders the brief names ($runFolders).
     readOnlyDirs = @($config.readOnlyDirs | Where-Object { $_ }) + @(
         Get-ChildItem (Join-Path $root 'local') -Directory -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -notin @('impl', 'agents') } | ForEach-Object { $_.FullName })
+            Where-Object { $_.Name -notin @('impl', 'agents') } | ForEach-Object { $_.FullName }) + @($runFolders)
     denyEdit     = @($keptDenies) + @(Get-TaskLinks | ForEach-Object { "$_/**" })
     # A project may set implAllowTools in .deepseek-agents.json; otherwise python plus the rules for each kind
     # of project detected above. implAllowTools replaces the default set; the project's own allowTools are
@@ -480,14 +511,12 @@ $schema = Join-Path $root 'tasks\deepseek\result-schema.json'
 if (-not (Test-Path $schema)) { $schema = Join-Path $harness 'templates\result-schema.json' }
 # The worker writes a harmless notice to stderr. Merging that into the pipeline under
 # ErrorActionPreference Stop turns it into a terminating error and kills this runner while
-# the worker carries on, so let stderr flow to ours and keep the preference relaxed here.
+# the worker carries on, so let stderr flow to ours and run it through Invoke-Native.
 $webArgs = @(if ($WebDomains) { '-WebDomains', $WebDomains })
-$previousPreference = $ErrorActionPreference
-$ErrorActionPreference = 'Continue'
-try {
-    $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $agent -TaskFile $briefPath -Dir $work `
-        -Label $Name -Schema $schema -MaxTurns $MaxTurns -TimeoutMinutes $TimeoutMinutes -Effort $Effort @webArgs | Out-String
-} finally { $ErrorActionPreference = $previousPreference }
+$webArgs += @(if ($Provider) { '-Provider', $Provider }) + @(if ($Tier) { '-Tier', $Tier })
+$out = Invoke-Native { & powershell -NoProfile -ExecutionPolicy Bypass -File $agent -TaskFile $briefPath -Dir $work `
+    -Label $Name -Schema $schema -MaxTurns $MaxTurns -TimeoutMinutes $TimeoutMinutes -Effort $Effort @webArgs } | Out-String
+$agentCode = $LASTEXITCODE
 $out.TrimEnd()
 [IO.File]::WriteAllText((Join-Path $work '.ds-result.json'), $out, (New-Object System.Text.UTF8Encoding $false))
 $footer = ($out -split "`n" | Where-Object { $_ -match 'session=\S+ status=' } | Select-Object -Last 1)
@@ -496,10 +525,27 @@ $status = if ($footer -match 'status=(\S+)') { $Matches[1] } else { 'unknown' }
 # No footer means the worker never ran (the launcher failed: no claude.exe, no key, a bad flag). Running
 # the acceptance builds then only costs minutes and records a misleading FAIL against an untouched
 # checkout (reported by the OpenSkyrim session, 2026-09-22), so stop and say what happened.
+# The launcher's exit code says why (see ds-agent.ps1): 4 held by the budget or pace (or stopped at a spend limit),
+# 3 timed out; anything else is a launch problem.
 if (-not $footer) {
-    $row = '{0},{1},implementation,{2},no-worker,,0,{3},{4},launch-failed,,,the launcher returned no worker result; acceptance skipped' -f `
-        $started.ToString('s'), $Name, $baseCommit.Substring(0, 7), $checks.Count, [int]((Get-Date) - $started).TotalSeconds
+    $outcome, $note = switch ($agentCode) {
+        4 { 'held', 'held by the budget or pace (launcher exit 4); acceptance skipped' }
+        3 { 'timed-out', 'the worker timed out and was stopped (launcher exit 3); acceptance skipped' }
+        default { 'launch-failed', 'the launcher returned no worker result; acceptance skipped' }
+    }
+    $row = '{0},{1},implementation,{2},no-worker,,0,{3},{4},{5},,,{6}' -f `
+        $started.ToString('s'), $Name, $baseCommit.Substring(0, 7), $checks.Count, [int]((Get-Date) - $started).TotalSeconds, $outcome, $note
     Write-PilotRow -Row $row -Task $Name -Dedupe:([bool]$Post)
+    if ($agentCode -eq 4) {
+        "[ds-impl] ${Name}: held by the budget or pace, so the coder did not run or was stopped (the launcher's reason is above). Acceptance skipped."
+        "[ds-impl] do the task yourself, or -Discard $Name and run it again after the time the launcher gave."
+        exit 4
+    }
+    if ($agentCode -eq 3) {
+        "[ds-impl] ${Name}: the coder timed out and was stopped. Acceptance skipped; its partial edits are in $work."
+        "[ds-impl] review them, then -Post $Name to run the checks, or -Discard $Name and brief a smaller task."
+        exit 3
+    }
     "[ds-impl] ${Name}: the worker did not run (no result from the launcher; its errors are above). Acceptance skipped."
     "[ds-impl] fix the launch problem, then -Discard $Name and run the task again."
     exit 1
@@ -512,7 +558,7 @@ if (-not $footer) {
 # folder) into one line ("tests/fixtures/"), which never matches an exact owned file path and
 # false-positives every task whose owned files live in a new subdirectory. This worktree is one
 # task's small checkout, not the full repo, so listing all files here is cheap.
-$touched = @(& git -C $work status --porcelain --untracked-files=all | ForEach-Object { ($_ -replace '^..\s+', '').Trim() } |
+$touched = @(Invoke-Native { & git -C $work status --porcelain --untracked-files=all } | ForEach-Object { ($_ -replace '^..\s+', '').Trim() } |
     Where-Object { $_ -and $_ -notmatch '^\.(deepseek-agents|ds-impl|ds-result|ds-review)\.json$' -and $_ -notmatch '(^|/)target/' })
 $outside = @($touched | Where-Object { $owned -notcontains $_ })
 if ($outside) { "[ds-impl] OUT OF SCOPE: $($outside -join ', ')" } else { "[ds-impl] scope ok ($($touched.Count) file(s): $($touched -join ', '))" }
@@ -521,10 +567,9 @@ if ($outside) { "[ds-impl] OUT OF SCOPE: $($outside -join ', ')" } else { "[ds-i
 $results = @()
 foreach ($check in $checks) {
     $command = "Set-Location '$work'; $check"
-    $ErrorActionPreference = 'Continue'   # unittest reports on stderr; that is not a failure here
-    $output = & powershell -NoProfile -ExecutionPolicy Bypass -Command $command 2>&1 | Out-String
+    # unittest reports on stderr; that is not a failure here
+    $output = Invoke-Native { & powershell -NoProfile -ExecutionPolicy Bypass -Command $command 2>&1 } | Out-String
     $code = $LASTEXITCODE
-    $ErrorActionPreference = 'Stop'
     $results += [pscustomobject]@{ Check = $check; Exit = $code }
     $tail = ($output -split "`n" | Where-Object { $_.Trim() } | Select-Object -Last 3) -join ' / '
     "[ds-impl] accept($code): $check -- $tail"
@@ -549,6 +594,6 @@ $acceptList = if ($checks) { ($checks | ForEach-Object { "'$_'" }) -join ', ' } 
 $reviewTask = "Review coder task $Name. Its brief: $briefPath. You are working in its git worktree; the main checkout, for comparison, is $root. The changed files are $($touched -join ', '). First see the change itself with 'git status' and 'git diff' (new files show in git status; read them). Then re-run the acceptance commands yourself: $acceptList, and say what you ran and what it printed; don't rely on the coder's own log. Check that the change does what the brief asks and nothing more, stays in its owned files, and is covered by its tests, and look for what the acceptance commands would miss. Read-only: report findings with file:line; do not fix anything."
 # Reviewers could run nothing before (10 of 19 OpenSkyrim reviews said so, 2026-09-25): allow the diff and the checks.
 $reviewRules = @('Bash(git status*)', 'Bash(git diff*)', 'Bash(git log *)', 'Bash(git show *)') + @($checks | Where-Object { $_ -and $_ -notmatch ',' } | ForEach-Object { "Bash($_)"; "Bash($_ *)" })
-"[ds-impl] next, in one message: start the next coder now, and this DeepSeek review of $Name beside it (it works in this worktree and builds only there):"
+"[ds-impl] next, in one message: start the next coder now, and this review worker for $Name beside it (it works in this worktree and builds only there):"
 "  powershell -NoProfile -ExecutionPolicy Bypass -File `"$agent`" -Kind review -Mode read -Effort high -Dir `"$work`" -AddDir `"$root`" -AllowTools `"$($reviewRules -join ',')`" -Label $reviewLabel -Task `"$reviewTask`""
 "[ds-impl] integrate $Name after reading the review; meanwhile do your own part (the next brief, integration wiring, checks of earlier work)."

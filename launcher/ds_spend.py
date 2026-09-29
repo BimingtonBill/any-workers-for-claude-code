@@ -8,7 +8,12 @@ or week, plus a head start of 20% of the limit. While spending stays within that
 When it runs ahead, workers ease off in steps (see EASE):
   1. lower effort (max becomes high), a note to finish in few steps, delegation one level down;
   2. effort low, and one worker at a time (a new one waits for others to finish, up to 20 minutes);
-  3. as 2, and no coders or leads until spending is back on pace.
+  3. as 2, and no coders or leads until spending is back on pace;
+  4. at twice the pace, no new workers at all until it catches up.
+A stretch (`stretch 3w`) makes each day's even share of the credit the pace target, not a hard limit: spending
+past it is never refused or stopped, only paced, and what is overspent comes out of the following days' shares,
+worked out again every midnight. Only limits the user sets with `set` are hard. Each provider has its own
+limits, pace and stretch (`--provider meta|xiaomi`); MiMo's plan is paced by ds_allowance.py.
 While Claude's own plan is tight (ds_claude.py, level 2 or more), the head start grows by
 CLAUDE_TIGHT_HEAD, so DeepSeek takes more of the work; the limits themselves never move.
 
@@ -22,8 +27,9 @@ CLAUDE_TIGHT_HEAD, so DeepSeek takes more of the work; the limits themselves nev
     python ds_spend.py off [--per day|week|run|stretch]  remove a limit (all of them when --per is left out)
     python ds_spend.py backfill <project> ...  add past runs from those projects to the spend record
 
-ds-agent.ps1 calls the rest itself: check (before a worker starts), live (every 15 seconds while it
-runs) and record (when it ends). Everything lives in one folder shared by every project, so a limit
+ds-agent.ps1 calls the rest itself: check (before a worker starts), poll (every 15 seconds while it
+runs: `live` and ds_steer.py `watch` in one process, reading only the transcript lines added since the
+last poll) and record (when it ends, from the whole transcript). `live` and `watch` still work alone. Everything lives in one folder shared by every project, so a limit
 covers all of them: DS_SPEND_DIR, else ~/.claude-deepseek/spend. It holds limits.json, spend.jsonl (one
 line per finished run) and live/ (what each running worker has spent so far).
 
@@ -45,6 +51,10 @@ import os
 import sys
 from pathlib import Path
 
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+import ds_common  # noqa: E402  (beside this file, in the harness and once installed)
+
 # DeepSeek list prices, US dollars per million tokens.
 PRICE = dict(cache_read=0.028, fresh_in=0.28, cache_write=0.28, out=0.42)
 
@@ -63,22 +73,21 @@ REFUSED = 3            # exit code for "over the limit"
 # (spent + this worker's estimate) to that allowance where each easing step begins.
 HEAD_START = 0.2
 CLAUDE_TIGHT_HEAD = 0.2   # extra head start while Claude's plan is tight (ds_claude.py level 2+): lean on DeepSeek
-EASE_AT = (1.0, 1.25, 1.5)
+EASE_AT = (1.0, 1.25, 1.5, 2.0)
 EXPENSIVE = ('impl', 'lead')
 EASE = {1: 'lower effort, short jobs, delegation one level down',
         2: 'effort low, one worker at a time, delegation one level down',
-        3: 'effort low, one worker at a time, no coders or leads, delegation one level down'}
+        3: 'effort low, one worker at a time, no coders or leads, delegation one level down',
+        # Step 4 came with pacing-only budgets (2026-09-29): with no hard limit behind the pace, spending twice
+        # the even pace holds every new worker until the pace catches up.
+        4: 'no new workers until spending is back on pace'}
 
 
-def spend_dir():
-    return Path(os.environ.get('DS_SPEND_DIR') or Path.home() / '.claude-deepseek' / 'spend')
-
-
-def read_json(path, default):
-    try:
-        return json.loads(Path(path).read_text(encoding='utf-8-sig'))
-    except (OSError, ValueError):
-        return default
+# One copy of each, in ds_common.py beside this file; the names stay here because other files and tests use them.
+spend_dir = ds_common.spend_dir
+read_json = ds_common.read_json
+write_json_atomic = ds_common.write_json_atomic
+parse_time = ds_common.parse_time
 
 
 def raw_limits(d):
@@ -87,15 +96,55 @@ def raw_limits(d):
     return lim if isinstance(lim, dict) else {}
 
 
-def limits(d, now=None):
-    """The limits in force: limits.json, with the daily limit lowered to today's share of the credit while
-    a stretch is set (stretch_day). 'stretchDay' then holds that share."""
+# Each provider has its own limits and pace (the user, 2026-09-29: a MiMo review on its prepaid plan was refused
+# because DeepSeek's daily limit was used up). DeepSeek's are limits.json's top-level keys, as before; another
+# provider's are under "providers": {"meta": {"day": 3}}. Its runs are the ledger rows with that "provider"
+# (DeepSeek's rows have none). A provider with no limits set has none; the per-worker cap ("run") is shared.
+PROVIDER_NAMES = {'deepseek': 'DeepSeek', 'xiaomi': 'MiMo', 'meta': 'Muse'}   # when providers.json can't say
+
+
+def prov_key(provider):
+    return (provider or 'deepseek').lower()
+
+
+def prov_name(provider):
+    """The provider's short name for messages ("MiMo", "Muse"): providers.json's "short" (ds_providers.short_name),
+    else PROVIDER_NAMES."""
+    key = prov_key(provider)
+    try:
+        import ds_providers
+        name = ds_providers.short_name(key)
+        if name and name != key:
+            return name
+    except Exception:
+        pass
+    return PROVIDER_NAMES.get(key, provider)
+
+
+def row_provider(r):
+    return prov_key(r.get('provider'))
+
+
+def limits(d, now=None, provider='deepseek'):
+    """The limits in force for a provider. DeepSeek: limits.json, with the daily limit lowered to today's share
+    of the credit while a stretch is set (stretch_day); 'stretchDay' then holds that share."""
     lim = raw_limits(d)
+    if prov_key(provider) != 'deepseek':
+        own = (lim.get('providers') or {}).get(prov_key(provider)) or {}
+        out = {p: own[p] for p in PERIODS + ('run',) if own.get(p)}
+        if 'run' not in out and lim.get('run'):
+            out['run'] = lim['run']
+        share = provider_stretch_day(d, own, prov_key(provider), now)
+        if share is not None:
+            out['stretchDay'], out['stretch'] = share, own['stretch']
+            if not out.get('day') or share < out['day']:
+                out['day'], out['dayIsShare'] = share, True
+        return out
     share = stretch_day(d, lim, now)
     if share is not None:
         lim['stretchDay'] = share
         if not lim.get('day') or share < lim['day']:
-            lim['day'] = share
+            lim['day'], lim['dayIsShare'] = share, True
     return lim
 
 
@@ -115,20 +164,42 @@ def stretch_day(d, lim=None, now=None):
     st = lim.get('stretch')
     if not isinstance(st, dict) or not st.get('until'):
         return None
-    now = (now or dt.datetime.now().astimezone()).astimezone()
-    until = parse_time(st['until'])
-    if now >= until:
-        return None
     b = last_balance(d)
     if not b:
         return None
+    return even_share(d, 'deepseek', b['usd'], b['at'], st['until'], now)
+
+
+def even_share(d, provider, usd, at, until, now=None):
+    """Today's even share of a provider's credit: `usd` as read at `at`, moved to midnight by what the provider's
+    runs spent in between, spread over the days left until `until`. None once `until` has passed."""
+    now = (now or dt.datetime.now().astimezone()).astimezone()
+    until = parse_time(until)
+    if now >= until:
+        return None
     day = midnight(now)
-    at = parse_time(b['at'])
-    between = sum(r.get('cost') or 0 for r in ledger(d) if r.get('ended') and min(day, at) <= parse_time(r['ended']) < max(day, at))
-    at_midnight = b['usd'] + (between if at >= day else -between)
+    at = parse_time(at)
+    between = sum(r.get('cost') or 0 for r, t in ended_rows(d, provider) if t and min(day, at) <= t < max(day, at))
+    at_midnight = usd + (between if at >= day else -between)
     days = max((until - day).total_seconds() / 86400, 1 / 24)
     left = max(0.0, at_midnight)
     return round(left / days if days >= 1 else left, 2)     # under a day to go: all of it today
+
+
+def provider_stretch_day(d, own, provider, now=None):
+    """Today's share for another provider's stretch: {"until", "credit", "at"} under its limits. It has no balance
+    endpoint, so the credit is what the user read off its console when the stretch was set."""
+    st = own.get('stretch')
+    if not isinstance(st, dict) or not st.get('until') or st.get('credit') is None or not st.get('at'):
+        return None
+    return even_share(d, provider, float(st['credit']), st['at'], st['until'], now)
+
+
+def soft(lim, period):
+    """A stretch's daily share is a pace target, not a hard limit (the user, 2026-09-29: "rely on pacing only"):
+    spending past it is not refused or stopped; the pace eases off and, well ahead, holds new work, and whatever
+    is overspent comes out of the following days' shares, which are worked out again every midnight."""
+    return period == 'day' and bool(lim.get('dayIsShare'))
 
 
 def parse_until(text, now=None):
@@ -156,21 +227,67 @@ def prices(d):
     return p
 
 
+def run_prices(d, provider='deepseek', tier='standard'):
+    """Prices for one run: DeepSeek's (with the user's overrides in limits.json), or another provider's from
+    launcher/providers.json. Each provider's dollars count against its own limits."""
+    if not provider or provider == 'deepseek':
+        return prices(d)
+    try:
+        import ds_providers
+        p = ds_providers.prices(provider, tier)
+    except Exception:
+        p = None
+    return p or prices(d)
+
+
 # --- Costs from a transcript ---
+
+class Usage:
+    """The running token totals behind usage(), fed one transcript entry at a time, each API message once (by
+    its id). state() and Usage(state) carry them between processes for `poll`."""
+
+    def __init__(self, state=None):
+        s = state or {}
+        self.u = dict(cache_read=0, fresh_in=0, cache_write=0, out=0)
+        self.u.update(s.get('usage') or {})
+        self.seen = set(s.get('seen') or ())
+
+    def feed(self, e, since=None):
+        msg = e.get('message') or {}
+        us, mid = msg.get('usage'), msg.get('id')
+        if not isinstance(us, dict) or (mid and mid in self.seen):
+            return
+        if since and e.get('timestamp') and parse_time(e['timestamp']) < since:
+            return
+        if mid:
+            self.seen.add(mid)
+        u = self.u
+        u['fresh_in'] += us.get('input_tokens') or 0
+        u['cache_read'] += us.get('cache_read_input_tokens') or 0
+        u['cache_write'] += us.get('cache_creation_input_tokens') or 0
+        u['out'] += us.get('output_tokens') or 0
+
+    def state(self):
+        return dict(usage=dict(self.u), seen=sorted(self.seen))
+
+
+def transcript_files(transcript):
+    """A worker transcript and its in-process subagents' transcripts, in the order usage() reads them."""
+    files = [Path(transcript)]
+    sub = Path(transcript).with_suffix('') / 'subagents'
+    if sub.is_dir():
+        files += sorted(sub.glob('*.jsonl'))
+    return files
+
 
 def usage(transcript, since=None):
     """Token totals in a worker transcript (and its in-process subagents' transcripts), once per API
     message, counting only messages at or after `since` (a resumed run's earlier launches are already
     recorded)."""
-    u = dict(cache_read=0, fresh_in=0, cache_write=0, out=0)
+    acc = Usage()
     if not transcript or not os.path.exists(transcript):
-        return u
-    files = [Path(transcript)]
-    sub = Path(transcript).with_suffix('') / 'subagents'
-    if sub.is_dir():
-        files += sorted(sub.glob('*.jsonl'))
-    seen = set()
-    for f in files:
+        return acc.u
+    for f in transcript_files(transcript):
         with open(f, encoding='utf-8', errors='replace') as fh:
             for line in fh:
                 if '"usage"' not in line:
@@ -179,29 +296,80 @@ def usage(transcript, since=None):
                     e = json.loads(line)
                 except ValueError:
                     continue
-                msg = e.get('message') or {}
-                us, mid = msg.get('usage'), msg.get('id')
-                if not isinstance(us, dict) or (mid and mid in seen):
+                acc.feed(e, since)
+    return acc.u
+
+
+def _new_lines(path, offset):
+    """The complete lines of `path` after byte `offset`, and the offset after the last of them. A line the worker
+    is still writing (no newline yet) is left for the next read."""
+    lines = []
+    with open(path, 'rb') as fh:
+        fh.seek(offset)
+        for raw in fh:
+            if not raw.endswith(b'\n'):
+                break
+            offset += len(raw)
+            lines.append(raw)
+    return lines, offset
+
+
+def poll_counts(transcript, since, run_dir, steer=True):
+    """(usage totals, signals or None) for a running worker, reading only what was added to its transcripts since
+    the last poll. The byte offset of each file and the running counts are kept in <run_dir>/poll.json; a new
+    launch (another `since`), another transcript, or a file that shrank starts the count again from the top."""
+    import ds_steer
+    state_file = Path(run_dir) / 'poll.json'
+    key = dict(since=since.isoformat(), transcript=str(transcript))
+    state = read_json(state_file, None)
+    if not isinstance(state, dict) or state.get('key') != key:
+        state = dict(key=key, files={})
+    offsets = state.get('files') or {}
+    try:
+        files = transcript_files(transcript)
+        if any(os.path.getsize(f) < offsets.get(str(f), 0) for f in files):
+            state, offsets = dict(key=key, files={}), {}
+    except OSError:
+        pass
+    acc = Usage(state)
+    sig = ds_steer.Signals(state.get('signals')) if steer else None
+    for n, f in enumerate(files):
+        try:
+            lines, offsets[str(f)] = _new_lines(f, offsets.get(str(f), 0))
+        except OSError:
+            continue
+        main = n == 0 and sig is not None
+        for raw in lines:
+            if main:
+                if b'"tool_use"' not in raw and b'"tool_result"' not in raw and b'"usage"' not in raw:
                     continue
+            elif b'"usage"' not in raw:
+                continue
+            try:
+                e = json.loads(raw.decode('utf-8', 'replace'))
+            except ValueError:
+                continue
+            if not isinstance(e, dict):
+                continue
+            if main:     # checked against `since` once here, for both counts
                 if since and e.get('timestamp') and parse_time(e['timestamp']) < since:
                     continue
-                if mid:
-                    seen.add(mid)
-                u['fresh_in'] += us.get('input_tokens') or 0
-                u['cache_read'] += us.get('cache_read_input_tokens') or 0
-                u['cache_write'] += us.get('cache_creation_input_tokens') or 0
-                u['out'] += us.get('output_tokens') or 0
-    return u
+                sig.feed(e)
+                acc.feed(e)
+            else:
+                acc.feed(e, since)
+    state = dict(key=key, files=offsets, **acc.state())
+    if sig is not None:
+        state['signals'] = sig.state()
+    try:
+        write_json_atomic(state_file, state, indent=None)
+    except OSError:
+        pass
+    return acc.u, (sig.result() if sig is not None else None)
 
 
 def cost(u, price=PRICE):
     return sum(u.get(k, 0) * p for k, p in price.items()) / 1e6
-
-
-def parse_time(text):
-    """An ISO time as an aware UTC datetime; one without a zone is taken as local time."""
-    t = dt.datetime.fromisoformat(str(text).replace('Z', '+00:00'))
-    return (t if t.tzinfo else t.astimezone()).astimezone(dt.timezone.utc)
 
 
 # --- Windows ---
@@ -230,18 +398,55 @@ def window(period, now=None, d=None):
     return start, end
 
 
-def ledger(d):
-    rows = []
+# spend.jsonl is parsed once per process while it is unchanged. A launch's plan() read it six times and status
+# nine, parsing every row's time each time: 0.4 s a launch at 12,000 rows (2026-09-29). Keyed on the file's path,
+# modification time, size and inode, so an appended or rewritten file is read again.
+_LEDGER = {}
+
+
+def _parse_ended(r):
     try:
-        with open(d / 'spend.jsonl', encoding='utf-8') as fh:
-            for line in fh:
-                try:
-                    rows.append(json.loads(line))
-                except ValueError:
-                    continue
+        return parse_time(r['ended']) if r.get('ended') else None
+    except (TypeError, ValueError):
+        return None
+
+
+def ended_rows(d, provider=None):
+    """(row, its 'ended' as an aware UTC datetime or None) for the recorded runs: every provider's, or one's.
+    The rows are shared with the cache: read them, don't change them."""
+    path = os.path.abspath(str(Path(d) / 'spend.jsonl'))
+    try:
+        st = os.stat(path)
     except OSError:
-        pass
-    return rows
+        _LEDGER.pop(path, None)
+        return []
+    key = (st.st_mtime_ns, st.st_size, st.st_ino)
+    hit = _LEDGER.get(path)
+    if not hit or hit['key'] != key:
+        rows = []
+        try:
+            with open(path, encoding='utf-8') as fh:
+                for line in fh:
+                    try:
+                        r = json.loads(line)
+                    except ValueError:
+                        continue
+                    rows.append((r, _parse_ended(r) if isinstance(r, dict) else None))
+        except OSError:
+            return []
+        hit = _LEDGER[path] = dict(key=key, rows=rows, by={})
+    if provider is None:
+        return hit['rows']
+    p = prov_key(provider)
+    if p not in hit['by']:
+        hit['by'][p] = [x for x in hit['rows'] if isinstance(x[0], dict) and row_provider(x[0]) == p]
+    return hit['by'][p]
+
+
+def ledger(d, provider=None):
+    """The recorded runs: every provider's, or one provider's. The rows are shared with the cache (ended_rows):
+    read them, don't change them."""
+    return [r for r, _ in ended_rows(d, provider)]
 
 
 def pid_alive(pid):
@@ -264,9 +469,9 @@ def pid_alive(pid):
         return False
 
 
-def live(d, exclude=None):
-    """What running workers have spent so far. A file whose launcher is gone is a leftover (the run
-    was recorded, or killed before it could be): drop it."""
+def live(d, exclude=None, provider=None):
+    """What running workers have spent so far (every provider's, or one provider's). A file whose launcher is
+    gone is a leftover (the run was recorded, or killed before it could be): drop it."""
     out = {}
     folder = d / 'live'
     if not folder.is_dir():
@@ -281,25 +486,27 @@ def live(d, exclude=None):
             except OSError:
                 pass
             continue
+        if provider is not None and row_provider(r) != prov_key(provider):
+            continue
         out[r['run_id']] = r
     return out
 
 
-def spent(d, period, now=None, exclude=None):
-    """Recorded runs that ended in this window plus what running workers have spent."""
+def spent(d, period, now=None, exclude=None, provider='deepseek'):
+    """One provider's recorded runs that ended in this window plus what its running workers have spent."""
     start, _ = window(period, now, d)
-    done = sum(r.get('cost') or 0 for r in ledger(d) if r.get('ended') and parse_time(r['ended']) >= start)
-    running = sum(r.get('cost') or 0 for r in live(d, exclude).values())
+    done = sum(r.get('cost') or 0 for r, t in ended_rows(d, provider) if t and t >= start)
+    running = sum(r.get('cost') or 0 for r in live(d, exclude, provider).values())
     return done + running
 
 
-def estimate(d, kind):
-    """What a run of this kind usually costs: the mean of its last 20 recorded runs once there are 3,
-    else the default table."""
+def estimate(d, kind, provider='deepseek'):
+    """What a run of this kind usually costs on this provider: the mean of its last 20 recorded runs once there
+    are 3, else the default table (DeepSeek's costs)."""
     # Newest by end time, not file order: a backfill appends whole projects one after another.
-    rows = sorted((r for r in ledger(d) if r.get('kind') == kind and r.get('cost') and r.get('ended')),
-                  key=lambda r: parse_time(r['ended']))
-    costs = [r['cost'] for r in rows][-20:]
+    rows = sorted(((r, t) for r, t in ended_rows(d, provider) if r.get('kind') == kind and r.get('cost') and t),
+                  key=lambda x: x[1])
+    costs = [r['cost'] for r, _ in rows][-20:]
     if len(costs) >= 3:
         return sum(costs) / len(costs)
     return DEFAULT_ESTIMATE.get(kind, FALLBACK_ESTIMATE)
@@ -320,31 +527,33 @@ def label(period):
 
 # --- Commands ---
 
-def check(d, kind, balance=None, now=None):
-    """(ok, lines) for starting a worker of this kind now."""
-    lim = limits(d, now)
-    est = estimate(d, kind)
+def check(d, kind, balance=None, now=None, provider='deepseek'):
+    """(ok, lines) for starting a worker of this kind on this provider now: only its own limits count."""
+    lim = limits(d, now, provider)
+    est = estimate(d, kind, provider)
+    name = prov_name(provider)
+    flag = '' if prov_key(provider) == 'deepseek' else ' --provider %s' % prov_key(provider)
     lines = []
     for period in PERIODS:
         cap = lim.get(period)
-        if not cap:
+        if not cap or soft(lim, period):
             continue
-        used = spent(d, period, now)
+        used = spent(d, period, now, provider=provider)
         left = cap - used
         if left <= 0:
-            return False, ['DeepSeek spend limit reached: $%.2f of $%.2f %s. It resets at %s. Do this work '
-                           'yourself, or ask the user to raise the limit (python ds_spend.py set <dollars> '
-                           '--per %s).' % (used, cap, label(period), resets(period, now, d), period)]
+            return False, ['%s spend limit reached: $%.2f of $%.2f %s. It resets at %s. Do this work '
+                           'as a Claude subagent on Sonnet 5.5, on another provider, or ask the user to raise the limit (python ds_spend.py '
+                           'set <dollars> --per %s%s).' % (name, used, cap, label(period), resets(period, now, d), period, flag)]
         if est > left:
-            return False, ['A %s worker usually costs about $%.2f, and only $%.2f of the $%.2f %s limit is '
-                           'left (resets at %s). Do this work yourself, give it to a cheaper kind, or ask the '
-                           'user to raise the limit.' % (kind, est, left, cap, 'daily' if period == 'day' else
-                                                         'weekly', resets(period, now, d))]
+            return False, ['A %s worker on %s usually costs about $%.2f, and only $%.2f of the $%.2f %s limit is '
+                           'left (resets at %s). Do this work yourself, give it to a cheaper kind or another provider, '
+                           'or ask the user to raise the limit.' % (kind, name, est, left, cap, 'daily' if period == 'day'
+                                                                    else 'weekly', resets(period, now, d))]
         if (used + est) / cap >= WARN_AT:
-            lines.append('%d%% of the %s DeepSeek limit will be used once this worker is done ($%.2f + about '
+            lines.append('%d%% of the %s %s limit will be used once this worker is done ($%.2f + about '
                          '$%.2f of $%.2f); it resets at %s.' % (100 * (used + est) / cap, 'daily' if period ==
-                         'day' else 'weekly', used, est, cap, resets(period, now, d)))
-    if balance is not None and est > balance:
+                         'day' else 'weekly', name, used, est, cap, resets(period, now, d)))
+    if balance is not None and prov_key(provider) == 'deepseek' and est > balance:
         return False, ['Your DeepSeek balance is $%.2f and a %s worker usually costs about $%.2f. Ask the user '
                        'to top up at platform.deepseek.com, or do this work yourself.' % (balance, kind, est)]
     return True, lines
@@ -370,6 +579,29 @@ def holds(d, since):
         else:
             waited.setdefault(r.get('run_id'), r)
     return refused, list(waited.values())
+
+
+def waited_logged(d, run_id):
+    """Whether holds.jsonl already has a 'waited' row for this run. A waiting launcher checks every 10 s, and a
+    row per check made 1,599 rows in five days (2026-09-29); holds() counts a run once anyway. A refused launch
+    is still logged every time."""
+    if not run_id:
+        return False
+    needle = json.dumps(run_id)
+    try:
+        with open(d / 'holds.jsonl', encoding='utf-8') as fh:
+            for line in fh:
+                if needle not in line or 'waited' not in line:
+                    continue
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(r, dict) and r.get('run_id') == run_id and r.get('held') != 'refused':
+                    return True
+    except OSError:
+        pass
+    return False
 
 
 def claude_level(d, now=None):
@@ -443,9 +675,10 @@ def rate_basis(d, now=None):
     weekly one) when that is lower, since spending can't run faster than the limits."""
     now = (now or dt.datetime.now().astimezone()).astimezone()
     since = now - dt.timedelta(days=7)
-    rate = sum(r.get('cost') or 0 for r in ledger(d) if r.get('ended') and parse_time(r['ended']) >= since) / 7
+    rate = sum(r.get('cost') or 0 for r, t in ended_rows(d, 'deepseek') if t and t >= since) / 7
     lim = limits(d, now)
-    caps = [(lim['day'], 'the $%.2f daily limit used in full' % lim['day'])] if lim.get('day') else []
+    caps = [(lim['day'], ("today's $%.2f share of the stretch" if lim.get('dayIsShare') else 'the $%.2f daily limit used in full')
+             % lim['day'])] if lim.get('day') else []
     if lim.get('week'):
         caps.append((lim['week'] / 7, 'the $%.2f weekly limit used in full' % lim['week']))
     cap = min(caps) if caps else None
@@ -487,12 +720,12 @@ def balance_warning(d, now=None):
     return balance_line(d, b['usd'], now, at=b['at'])
 
 
-def pace(d, kind, now=None):
-    """How far spending is ahead of an even pace: ease 0 (on pace) to 3, the period behind it, and when a
-    worker of this kind fits the pace again (None when only the reset will do)."""
+def pace(d, kind, now=None, provider='deepseek'):
+    """How far a provider's spending is ahead of an even pace: ease 0 (on pace) to 3, the period behind it, and
+    when a worker of this kind fits the pace again (None when only the reset will do)."""
     now = (now or dt.datetime.now().astimezone()).astimezone()
-    lim = limits(d, now)
-    est = estimate(d, kind)
+    lim = limits(d, now, provider)
+    est = estimate(d, kind, provider)
     best = dict(ease=0, period=None, fits_at=None)
     # While Claude's plan is tight, DeepSeek may run further ahead of an even pace; its limits don't move.
     head = HEAD_START + (CLAUDE_TIGHT_HEAD if claude_level(d, now) >= 2 else 0)
@@ -502,7 +735,7 @@ def pace(d, kind, now=None):
             continue
         start, end = window(period, now, d)
         gone = (now - start) / (end - start)
-        need = spent(d, period, now) + est
+        need = spent(d, period, now, provider=provider) + est
         ratio = need / (cap * min(1.0, gone + head))
         ease = sum(ratio > t for t in EASE_AT)
         if ease > best['ease']:
@@ -511,16 +744,16 @@ def pace(d, kind, now=None):
     return best
 
 
-def plan(d, kind, balance=None, now=None, lineage='', waited=False):
-    """Whether and how a worker of this kind starts now: the hard limits (check), then the pace. Returns
-    ok, lines (what to tell Claude), ease, effort_cap ('high', 'low' or None) and wait (other workers are
-    running and this one should wait for them)."""
-    ok, lines = check(d, kind, balance, now)
+def plan(d, kind, balance=None, now=None, lineage='', waited=False, provider='deepseek'):
+    """Whether and how a worker of this kind starts now on this provider: its hard limits (check), then its
+    pace. Returns ok, lines (what to tell Claude), ease, effort_cap ('high', 'low' or None) and wait (other
+    workers on the same provider are running and this one should wait for them)."""
+    ok, lines = check(d, kind, balance, now, provider)
     out = dict(ok=ok, lines=lines, ease=0, effort_cap=None, wait=False)
     both = ("Claude's plan is ahead of its pace too (ds_claude.py status), so don't do this yourself: split off "
             'what a research or review worker can do and queue the rest for when either budget frees up.')
     if not ok:
-        lim = limits(d, now)
+        lim = limits(d, now, provider)
         if (lim.get('stretchDay') is not None and lim['day'] == lim['stretchDay']
                 and spent(d, 'day', now) + estimate(d, kind) > lim['day']):
             lines.append("Today's daily limit is today's share of the credit, spread to last until %s at the "
@@ -529,21 +762,25 @@ def plan(d, kind, balance=None, now=None, lineage='', waited=False):
         if claude_level(d, now) >= 2:
             lines.append('But ' + both)
         return out
-    p = pace(d, kind, now)
+    p = pace(d, kind, now, provider)
     ease = out['ease'] = p['ease']
     if not ease:
         return out
-    ahead = 'DeepSeek spending is ahead of an even pace for the %s limit' % ('daily' if p['period'] == 'day' else 'weekly')
-    if ease >= 3 and kind in EXPENSIVE:
+    lim = limits(d, now, provider)
+    ahead = prov_name(provider) + ' spending is ahead of an even pace for %s' % (
+        "today's share of the credit, spread to last until %s" % parse_time(lim['stretch']['until']).astimezone().strftime(
+            '%a %d %b') if soft(lim, p['period']) else 'the %s limit' % ('daily' if p['period'] == 'day' else 'weekly'))
+    if ease >= 4 or (ease >= 3 and kind in EXPENSIVE):
         when = ('it fits the pace again at %s' % p['fits_at'].astimezone().strftime('%H:%M' if p['period'] == 'day' else '%a %H:%M')
                 if p['fits_at'] else 'it fits again after the reset at %s' % resets(p['period'], now, d))
-        out.update(ok=False, lines=['%s, so %s workers wait (%s). %s' % (
-            ahead, kind, when, both if claude_level(d, now) >= 2 else
-            'Do this yourself, split off the parts a research or review worker can do, or wait.')])
+        out.update(ok=False, lines=['%s, so %s wait (%s). %s' % (
+            ahead, 'all new workers' if ease >= 4 else '%s workers' % kind, when, both if claude_level(d, now) >= 2 else
+            'Run it as a Claude subagent on Sonnet 5.5 instead (Opus only if Sonnet has already failed at it, or the user asks), or wait.' if ease >= 4 else
+            'Run it as a Claude subagent on Sonnet 5.5 instead (Opus only if Sonnet has already failed at it, or the user asks), split off the parts a research or review worker can do, or wait.')])
         return out
     out['effort_cap'] = 'high' if ease == 1 else 'low'
     mine = set(filter(None, lineage.split('/')))
-    others = [r for r in live(d).values() if r.get('run_id') not in mine]
+    others = [r for r in live(d, provider=provider).values() if r.get('run_id') not in mine]
     out['wait'] = ease >= 2 and bool(others) and not waited
     lines.append('%s: easing off (%s).' % (ahead, EASE[ease]))
     return out
@@ -607,14 +844,51 @@ def run_cap_nudge(run_dir, spent_so_far, cap):
     return True
 
 
-def over(d, run_id, now=None):
-    """The first limit that running workers and recorded runs together have now reached, or None."""
-    lim = limits(d, now)
+def over(d, run_id, now=None, provider='deepseek'):
+    """The first of a provider's limits that its running workers and recorded runs together have now reached,
+    or None."""
+    lim = limits(d, now, provider)
     for period in PERIODS:
         cap = lim.get(period)
-        if cap and spent(d, period, now) >= cap:
+        if cap and not soft(lim, period) and spent(d, period, now, provider=provider) >= cap:
             return period, cap
     return None
+
+
+def provider_lines(d, now=None):
+    """One line for each other provider that has limits, spending this week or a plan: what it spent against its
+    own limits, and its plan's allowance (launcher/ds_allowance.py, e.g. MiMo's Token Plan)."""
+    plans = {}
+    try:
+        import ds_allowance
+        for key in sorted((ds_allowance.ds_providers.user_settings().get('plans') or {})):
+            text = ds_allowance.line(*key.split('/', 1), d=d)
+            if text:
+                plans.setdefault(prov_key(key.split('/', 1)[0]), []).append(text)
+    except Exception:
+        pass
+    seen = {row_provider(r) for r in ledger(d)} | set((raw_limits(d).get('providers') or {})) | set(plans)
+    out = []
+    for prov in sorted(seen - {'deepseek'}):
+        lim = limits(d, now, prov)
+        parts = []
+        for period in PERIODS:
+            used = spent(d, period, now, provider=prov)
+            parts.append(('%s $%.2f of $%.2f' % (label(period), used, lim[period])) if lim.get(period)
+                         else '%s $%.2f' % (label(period), used))
+        has_limit = any(lim.get(x) for x in PERIODS)
+        if not has_limit and prov not in plans and not spent(d, 'week', now, provider=prov):
+            continue
+        text = ', '.join(parts) + ('' if has_limit else ', no dollar limit')
+        if lim.get('stretchDay') is not None:
+            text += ' (budget $%.2f spread to last until %s; the daily figure is a pace target)' % (
+                float(lim['stretch']['credit']), parse_time(lim['stretch']['until']).astimezone().strftime('%a %d %b'))
+        if has_limit:
+            ease = pace(d, 'research', now, prov)['ease']
+            text += '; ' + ('ahead of an even pace, easing off' if ease else 'on pace')
+        out.append('%-9s %s' % (prov_name(prov) + ':', text))
+        out += ['  plan:    ' + t for t in plans.get(prov, [])]
+    return out
 
 
 def stretch_line(d, now=None):
@@ -639,13 +913,74 @@ def stretch_line(d, now=None):
     return 'stretch:  credit spread to last until %s: $%.2f for today, %.1f days left%s' % (when, share, days, tighter)
 
 
-def stretch_cmd(d, text, now=None):
+def plan_stretch(provider, text, now):
+    """A stretch for a provider on a plan with an allowance (MiMo's Token Plan): its pacing (ds_allowance.py) spreads
+    the allowance to that moment instead of the plan's renewal. Returns the message, or None without such a plan."""
+    import ds_allowance
+    settings = ds_allowance.ds_providers.user_settings()
+    keys = [k for k in (settings.get('plans') or {}) if k.split('/', 1)[0] == provider]
+    if not keys:
+        return None
+    off = text.strip().lower() in ('off', 'stop', 'none')
+    until = None if off else parse_until(text, now)
+    for k in keys:
+        if off:
+            settings['plans'][k].pop('paceUntil', None)
+        else:
+            settings['plans'][k]['paceUntil'] = until.isoformat(timespec='seconds')
+    write_json_atomic(ds_common.user_providers_path(), settings)
+    lines = [ds_allowance.line(*k.split('/', 1)) for k in keys]
+    head = ('%s is paced over its plan period again.' % prov_name(provider) if off else
+            "%s's plan allowance is now spread to last until %s." % (prov_name(provider), until.astimezone().strftime('%a %d %b %H:%M')))
+    return '\n'.join([head] + [l for l in lines if l])
+
+
+def stretch_cmd(d, text, now=None, provider='deepseek', credit=None):
     now = (now or dt.datetime.now().astimezone()).astimezone()
+    provider = prov_key(provider)
+    if provider != 'deepseek':
+        try:
+            msg = plan_stretch(provider, text, now) if credit is None else None
+        except ValueError as e:
+            print(str(e))
+            return 2
+        if msg:
+            print(msg)
+            return 0
+        lim = raw_limits(d)
+        own = lim.setdefault('providers', {}).setdefault(provider, {})
+        if text.strip().lower() in ('off', 'stop', 'none'):
+            own.pop('stretch', None)
+        else:
+            try:
+                until = parse_until(text, now)
+            except ValueError as e:
+                print(str(e))
+                return 2
+            old = own.get('stretch') or {}
+            if credit is None and old.get('credit') is None:
+                print('%s has no balance the harness can read: give the dollars to spend by then (its prepaid credit, or a budget for a billed-after account), '
+                      'e.g. `stretch 3w --provider %s --credit 20`.' % (prov_name(provider), provider))
+                return 2
+            own['stretch'] = dict(until=until.isoformat(timespec='seconds'), set=now.isoformat(timespec='seconds'),
+                                  credit=round(credit, 2) if credit is not None else old['credit'],
+                                  at=now.isoformat(timespec='seconds') if credit is not None else old['at'])
+        if not own:
+            lim['providers'].pop(provider, None)
+        if not lim.get('providers'):
+            lim.pop('providers', None)
+        d.mkdir(parents=True, exist_ok=True)
+        write_json_atomic(d / 'limits.json', lim)
+        share = limits(d, now, provider).get('stretchDay')
+        print('%s: %s' % (prov_name(provider), 'no longer stretched' if 'stretch' not in own else
+                          'budget spread to last until %s: $%.2f for today, as a pace target' % (
+                              until.strftime('%a %d %b %H:%M'), share or 0)))
+        return 0
     lim = raw_limits(d)
     if text.strip().lower() in ('off', 'stop', 'none'):
         lim.pop('stretch', None)
         d.mkdir(parents=True, exist_ok=True)
-        (d / 'limits.json').write_text(json.dumps(lim, indent=2) + '\n', encoding='utf-8')
+        write_json_atomic(d / 'limits.json', lim)
         print('The credit is no longer stretched; the other limits stay as they were.')
         return 0
     try:
@@ -661,7 +996,7 @@ def stretch_cmd(d, text, now=None):
         save_balance(d, *fresh, now=now)
     d.mkdir(parents=True, exist_ok=True)
     lim['stretch'] = dict(until=until.isoformat(timespec='seconds'), set=now.isoformat(timespec='seconds'))
-    (d / 'limits.json').write_text(json.dumps(lim, indent=2) + '\n', encoding='utf-8')
+    write_json_atomic(d / 'limits.json', lim)
     print('DeepSeek spending is now spread so your credit lasts until %s: each day gets an even share of what '
           'is left, worked out again every day, and the usual pacing spreads each share through the day.'
           % until.astimezone().strftime('%a %d %b %H:%M'))
@@ -685,6 +1020,24 @@ def show_balance(d, given=None, offline=False):
     return balance_line(d, b['usd'], at=b['at']) if b else None
 
 
+def live_stop(d, a, c):
+    """`live` for a running worker that has cost `c` so far: note it in live/<run id>.json, queue the wrap-up nudge
+    at RUN_NUDGE_AT of its cap, and say why it must stop now (its cap, or a spend limit used up), else None."""
+    (d / 'live').mkdir(parents=True, exist_ok=True)
+    (d / 'live' / ('%s.json' % a.run_id)).write_text(
+        json.dumps(dict(run_id=a.run_id, pid=a.pid, cost=c, kind=a.kind, provider=prov_key(a.provider))), encoding='utf-8')
+    cap = a.run_cap if a.run_cap is not None else limits(d, provider=a.provider).get('run')
+    if cap and c >= cap:
+        return 'this worker has cost $%.2f, reaching the $%.2f cap per worker; brief what is left as smaller tasks' % (c, cap)
+    if cap and a.run_dir and c >= RUN_NUDGE_AT * cap:
+        run_cap_nudge(a.run_dir, c, cap)
+    hit = over(d, a.run_id, provider=a.provider)
+    if hit:
+        return 'the %s %s spend limit ($%.2f) is used up; it resets at %s' % (
+            'daily' if hit[0] == 'day' else 'weekly', prov_name(a.provider), hit[1], resets(hit[0], None, d))
+    return None
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     ap.add_argument('--dir', help='the spend folder (default: DS_SPEND_DIR or ~/.claude-deepseek/spend)')
@@ -694,29 +1047,51 @@ def main(argv=None):
     s = sub.add_parser('balance', help='the DeepSeek balance and how long it lasts at the last week\'s rate')
     s.add_argument('--offline', action='store_true'); s.add_argument('--json', action='store_true')
     s = sub.add_parser('set'); s.add_argument('dollars', type=float); s.add_argument('--per', choices=PERIODS + ('run',), default='day')
+    s.add_argument('--provider', default='deepseek', help="another provider's own limit (meta, xiaomi); the default is DeepSeek's")
     s.add_argument('--from-now', action='store_true', help='count only spending from now on; with --per week, weeks '
                    'also start on today\'s weekday instead of Monday')
     s = sub.add_parser('off'); s.add_argument('--per', choices=PERIODS + ('run', 'stretch'))
+    s.add_argument('--provider', default='deepseek')
     s = sub.add_parser('stretch', help='make the DeepSeek credit last until then: 2w, 10d, 36h, 1m, a date, or off')
     s.add_argument('until')
+    s.add_argument('--provider', default='deepseek', help='another provider: MiMo paces its plan to that date; Muse needs --credit')
+    s.add_argument('--credit', type=float, help="dollars to spend by then: the provider's prepaid credit, or a budget (Meta bills after use)")
     s = sub.add_parser('check'); s.add_argument('--kind', required=True); s.add_argument('--balance', type=float)
+    s.add_argument('--provider', default='deepseek', help="the worker's provider: only its own limits and pace count")
     s.add_argument('--json', action='store_true', help='print the plan (pace included) as JSON')
     s.add_argument('--run-id'); s.add_argument('--pid', type=int)
     s.add_argument('--lineage', default='', help="the worker's lineage (claude/<parent>/...): its ancestors never make it wait")
     s.add_argument('--claim', action='store_true', help='when it may start, mark it running (needs --run-id and --pid)')
     s.add_argument('--waited', action='store_true', help='it has waited long enough; start even if others run')
-    for name in ('live', 'record'):
+    for name in ('live', 'record', 'poll'):
         s = sub.add_parser(name)
         s.add_argument('--run-id', required=True); s.add_argument('--transcript', required=True)
         s.add_argument('--since', required=True, help='when this launch started (ISO time)')
         s.add_argument('--pid', type=int, help='the launcher process')
         s.add_argument('--kind'); s.add_argument('--effort'); s.add_argument('--project')
+        s.add_argument('--provider', default='deepseek'); s.add_argument('--tier', default='standard')
+        s.add_argument('--out-total', type=int, default=0, help="record: the result's output total, when the transcript lacks it")
         s.add_argument('--run-dir', help='live: the run folder, for the wrap-up nudge')
         s.add_argument('--run-cap', type=float, help='live: this run\'s cap in dollars (-MaxCost), instead of the "run" limit')
+        if name == 'poll':
+            s.add_argument('--budget', type=int, help="the steps this worker's kind usually takes (ds_steer.py watch)")
+            s.add_argument('--no-steer', action='store_true', help='the spend part only, no nudges')
+            s.add_argument('--deadline', help='when the launcher stops the worker (ISO time), for the time nudge')
+            s.add_argument('--timeout-minutes', type=int, help="this launch's timeout, for the time nudge")
     s = sub.add_parser('backfill'); s.add_argument('projects', nargs='+')
     a = ap.parse_args(argv)
     d = Path(a.dir) if a.dir else spend_dir()
 
+    if a.cmd == 'set' and prov_key(a.provider) != 'deepseek':
+        if a.dollars <= 0 or a.per == 'run' or a.from_now:
+            ap.error('another provider takes a daily or weekly limit of more than 0 (the per-worker cap and --from-now are shared)')
+        d.mkdir(parents=True, exist_ok=True)
+        lim = raw_limits(d)
+        lim.setdefault('providers', {}).setdefault(prov_key(a.provider), {})[a.per] = round(a.dollars, 2)
+        write_json_atomic(d / 'limits.json', lim)
+        print('%s spend is now limited to $%.2f a %s, across all projects; the other providers keep their own limits.' % (
+            prov_name(a.provider), a.dollars, a.per))
+        return 0
     if a.cmd == 'set':
         if a.dollars <= 0:
             ap.error('a limit must be more than 0; use "off" to remove one')
@@ -726,22 +1101,36 @@ def main(argv=None):
             lim['countFrom'] = dt.datetime.now().astimezone().isoformat(timespec='seconds')
             if a.per == 'week':
                 lim['weekStartsOn'] = dt.date.today().weekday()
-        (d / 'limits.json').write_text(json.dumps(lim, indent=2) + '\n', encoding='utf-8')
+        write_json_atomic(d / 'limits.json', lim)
         print('DeepSeek spend is now limited to $%.2f a %s, across all projects%s.' % (
             a.dollars, 'worker' if a.per == 'run' else a.per, ', counting from now' + (' (weeks start on %s)' % dt.date.today().strftime('%A')
                                                         if a.per == 'week' else '') if a.from_now else ''))
         return 0
     if a.cmd == 'stretch':
-        return stretch_cmd(d, a.until)
+        return stretch_cmd(d, a.until, provider=a.provider, credit=a.credit)
+    if a.cmd == 'off' and prov_key(a.provider) != 'deepseek':
+        lim = raw_limits(d)
+        own = (lim.get('providers') or {}).get(prov_key(a.provider)) or {}
+        for period in ([a.per] if a.per else PERIODS):
+            own.pop(period, None)
+        if not own:
+            (lim.get('providers') or {}).pop(prov_key(a.provider), None)
+        if not lim.get('providers'):
+            lim.pop('providers', None)
+        if d.is_dir():
+            write_json_atomic(d / 'limits.json', lim)
+        print('%s limits now: %s' % (prov_name(a.provider), ', '.join('$%.2f a %s' % (own[p], p) for p in PERIODS if own.get(p)) or 'none'))
+        return 0
     if a.cmd == 'off':
         lim = raw_limits(d)
         for period in ([a.per] if a.per else PERIODS + ('run', 'stretch')):
             lim.pop(period, None)
         if d.is_dir():
-            (d / 'limits.json').write_text(json.dumps(lim, indent=2) + '\n', encoding='utf-8')
+            write_json_atomic(d / 'limits.json', lim)
         print('Limits now: %s' % (', '.join('$%.2f a %s' % (lim[p], 'worker' if p == 'run' else p) for p in PERIODS + ('run',) if lim.get(p)) or 'none'))
         return 0
     if a.cmd == 'status':
+        print('DeepSeek:')
         lim = limits(d)
         for period in PERIODS:
             used = spent(d, period)
@@ -749,7 +1138,8 @@ def main(argv=None):
             if cap:
                 pct = min(used / cap, 1)
                 bar = '#' * round(20 * pct) + '-' * (20 - round(20 * pct))
-                print('%-9s [%s] %3d%%  $%.2f of $%.2f, resets %s' % (label(period), bar, 100 * used / cap, used, cap, resets(period, None, d)))
+                print('%-9s [%s] %3d%%  $%.2f of $%.2f%s, resets %s' % (label(period), bar, 100 * used / cap, used, cap,
+                      " (today's share: a pace target, not a limit)" if soft(lim, period) else '', resets(period, None, d)))
             else:
                 print('%-9s $%.2f spent, no limit' % (label(period), used))
         p = pace(d, 'research')
@@ -759,12 +1149,14 @@ def main(argv=None):
             print('per worker: stopped at $%.2f, told to wrap up at $%.2f' % (lim['run'], RUN_NUDGE_AT * lim['run']))
         if stretch_line(d):
             print(stretch_line(d))
-        running = live(d)
+        running = live(d, provider='deepseek')
         if running:
             print('running:  %d worker(s), $%.2f so far' % (len(running), sum(r.get('cost') or 0 for r in running.values())))
         b = show_balance(d, a.balance, a.offline)
         if b:
             print('balance:  ' + b.replace('DeepSeek balance: ', ''))
+        for line in provider_lines(d):
+            print(line)
         print('(estimated from transcripts at list prices; the DeepSeek dashboard has the real bill)')
         return 0
     if a.cmd == 'balance':
@@ -787,49 +1179,63 @@ def main(argv=None):
             except OSError:
                 pass
         if not a.json:
-            ok, lines = check(d, a.kind, a.balance)
+            ok, lines = check(d, a.kind, a.balance, provider=a.provider)
             for line in lines:
                 print(line)
             return 0 if ok else REFUSED
         with locked(d):
-            out = plan(d, a.kind, a.balance, lineage=a.lineage, waited=a.waited)
-            if a.claim and (not out['ok'] or out['wait']):
-                with open(d / 'holds.jsonl', 'a', encoding='utf-8') as fh:
+            out = plan(d, a.kind, a.balance, lineage=a.lineage, waited=a.waited, provider=a.provider)
+            if a.claim and (not out['ok'] or (out['wait'] and not waited_logged(d, a.run_id))):
+                with open(d / 'holds.jsonl', 'a', encoding='utf-8', newline='\n') as fh:
                     fh.write(json.dumps(dict(at=dt.datetime.now().astimezone().isoformat(timespec='seconds'),
-                                             run_id=a.run_id, kind=a.kind, held='refused' if not out['ok'] else 'waited',
+                                             run_id=a.run_id, kind=a.kind, provider=prov_key(a.provider), held='refused' if not out['ok'] else 'waited',
                                              ease=out['ease'], why=' '.join(out['lines'])[:300])) + '\n')
             if out['ok'] and not out['wait'] and a.claim and a.run_id and a.pid:
                 (d / 'live').mkdir(parents=True, exist_ok=True)
                 (d / 'live' / ('%s.json' % a.run_id)).write_text(
-                    json.dumps(dict(run_id=a.run_id, pid=a.pid, cost=0, kind=a.kind)), encoding='utf-8')
+                    json.dumps(dict(run_id=a.run_id, pid=a.pid, cost=0, kind=a.kind, provider=prov_key(a.provider))), encoding='utf-8')
         print(json.dumps(out))
         return 0 if out['ok'] else REFUSED
+    if a.cmd == 'poll':
+        # `live` and ds_steer.py `watch` in one process, reading only the transcript lines added since the last
+        # poll (poll_counts). Prints one JSON line: the nudges queued, the cost so far, and why to stop, if so.
+        if not a.run_dir:
+            ap.error('poll needs --run-dir')
+        since = parse_time(a.since)
+        steer = not a.no_steer
+        u, sig = poll_counts(a.transcript, since, a.run_dir, steer=steer)
+        fired = []
+        if steer:
+            import ds_steer
+            fired = [k for k, _ in ds_steer.watch(a.transcript, since, a.run_dir, a.budget, sig=sig,
+                                                  deadline=parse_time(a.deadline) if a.deadline else None,
+                                                  minutes=a.timeout_minutes)]
+        c = cost(u, run_prices(d, a.provider, a.tier))
+        stop = live_stop(d, a, c)
+        print(json.dumps(dict(nudged=fired, cost=round(c, 5), stop=stop)))
+        return REFUSED if stop else 0
     if a.cmd in ('live', 'record'):
         u = usage(a.transcript, parse_time(a.since))
-        c = cost(u, prices(d))
+        if a.out_total > u['out']:
+            u['out'] = a.out_total
+        c = cost(u, run_prices(d, a.provider, a.tier))
         (d / 'live').mkdir(parents=True, exist_ok=True)
         lf = d / 'live' / ('%s.json' % a.run_id)
         if a.cmd == 'live':
-            lf.write_text(json.dumps(dict(run_id=a.run_id, pid=a.pid, cost=c, kind=a.kind)), encoding='utf-8')
-            cap = a.run_cap if a.run_cap is not None else limits(d).get('run')
-            if cap and c >= cap:
-                print('this worker has cost $%.2f, reaching the $%.2f cap per worker; brief what is left as smaller tasks' % (c, cap))
-                return REFUSED
-            if cap and a.run_dir and c >= RUN_NUDGE_AT * cap:
-                run_cap_nudge(a.run_dir, c, cap)
-            hit = over(d, a.run_id)
-            if hit:
-                print('the %s DeepSeek spend limit ($%.2f) is used up; it resets at %s' % ('daily' if hit[0] == 'day' else 'weekly', hit[1], resets(hit[0], None, d)))
+            stop = live_stop(d, a, c)
+            if stop:
+                print(stop)
                 return REFUSED
             return 0
         row = dict(run_id=a.run_id, kind=a.kind, effort=a.effort, project=a.project, started=a.since,
+                   **({} if a.provider == 'deepseek' else dict(provider=a.provider, tier=a.tier)),
                    ended=dt.datetime.now().astimezone().isoformat(timespec='seconds'), cost=round(c, 5), **u)
         try:                  # the steps it took, for the step budget of its kind (ds_steer.budget)
             import ds_steer
             row['steps'] = ds_steer.signals(a.transcript, parse_time(a.since))['steps']
         except Exception:
             pass
-        with open(d / 'spend.jsonl', 'a', encoding='utf-8') as fh:
+        with open(d / 'spend.jsonl', 'a', encoding='utf-8', newline='\n') as fh:
             fh.write(json.dumps(row) + '\n')
         try:
             lf.unlink()
@@ -841,7 +1247,7 @@ def main(argv=None):
         d.mkdir(parents=True, exist_ok=True)
         have = {r.get('run_id') for r in ledger(d)}
         added, total = 0, 0.0
-        with open(d / 'spend.jsonl', 'a', encoding='utf-8') as fh:
+        with open(d / 'spend.jsonl', 'a', encoding='utf-8', newline='\n') as fh:
             for proj in a.projects:
                 runs = Path(proj) / 'local' / 'agents' / 'runs'
                 for mf in sorted(runs.glob('*/manifest.json')) if runs.is_dir() else []:

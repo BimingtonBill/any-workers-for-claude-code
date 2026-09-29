@@ -19,7 +19,7 @@ The tool is `python "$HOME/.claude/skills/deepseek-agents/ds_spend.py"`. Limits 
 | an amount and `week` | `set <n> --per week` |
 | an amount and `run` (or "worker", "each") | `set <n> --per run`: each worker is told to wrap up at 75% and stopped at the cap |
 | any of those plus "from now" (or "starting now") | add `--from-now`: spending before now doesn't count, and a weekly limit starts its weeks on today's weekday |
-| `last <how long>` or "make my credit last ...", e.g. `last 2 weeks`, `last until Oct 9` | `stretch <2w, 10d, 36h, 1m, or a date as YYYY-MM-DD>`: each day's limit becomes an even share of the credit left, worked out again every midnight. Turn a weekday or "end of the month" into a date first |
+| `last <how long>` or "make my credit last ...", e.g. `last 2 weeks`, `last until Oct 9` | `stretch <2w, 10d, 36h, 1m, or a date as YYYY-MM-DD>`: each day gets an even share of the credit left, worked out again every midnight, as a pace target (never a hard limit). Add `--provider xiaomi` for MiMo's plan, or `--provider meta --credit <dollars>` for Muse. Turn a weekday or "end of the month" into a date first |
 | `off` | `off`: removes every limit and any stretch (confirm in one line which ones were removed) |
 | `off day`, `off week`, `off run`, `off stretch` | `off --per <that>` |
 

@@ -21,18 +21,18 @@ import subprocess
 import sys
 from pathlib import Path
 
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    from ds_state import project_root  # noqa: E402  (beside this file, in the harness and installed)
+except ImportError:     # this tool copied alone into a project's tools/: DS_PROJECT or the folder above tools/
+    def project_root(tools_dir):
+        return Path(os.environ.get('DS_PROJECT') or Path(tools_dir).resolve().parent).resolve()
+
+
 def _project_root():
-    """The project these tools act on. Run from the DeepSeek Workers harness or the installed skill,
-    that is DS_PROJECT or the current folder. Copied into a project's tools/, it is DS_PROJECT or the
-    folder above tools/, wherever it is run from."""
-    if os.environ.get('DS_PROJECT'):
-        return Path(os.environ['DS_PROJECT']).resolve()
-    here = Path(__file__).resolve().parents[1]
-    # The harness (launcher/ds-agent.ps1) or the installed skill (ds-agent.ps1 beside tools/): act on
-    # the folder it is run from. Anywhere else, the tools sit in a project's tools/: act on that project.
-    if (here / 'launcher' / 'ds-agent.ps1').exists() or (here / 'ds-agent.ps1').exists():
-        return Path(os.getcwd()).resolve()
-    return here
+    """The project these tools act on (ds_state.project_root)."""
+    return project_root(Path(__file__).resolve().parent)
 
 
 ROOT = _project_root()

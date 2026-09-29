@@ -33,6 +33,16 @@
                         "timeoutMinutes": 150, "model": "deepseek-flash[1m]" }
     }
   Explicit parameters always win over "defaults".
+
+  Exit codes (ds-spawn.ps1, tools/ds_impl.ps1 and ds_mcp.py rely on these):
+    0  the worker finished and its result was read
+    1  the worker failed: it crashed, returned an error or unreadable result, or its provider refused it
+       (the worker's own exit code, whatever it was, is kept in the manifest as worker_exit_code)
+    2  bad arguments or setup (no brief, no key, no Claude Code, a refused provider or tier, the depth limit).
+       PowerShell itself exits 1 before this script runs for a parameter it cannot bind (an unknown flag, or a
+       value outside a -Kind/-Mode/-Effort list)
+    3  timed out: stopped after -TimeoutMinutes, with a partial report when it had written anything
+    4  held by the budget or pace: refused before starting, or stopped at a spend limit or its cost cap
 #>
 [CmdletBinding(PositionalBinding = $false)]
 param(
@@ -58,6 +68,10 @@ param(
     # Continue an earlier worker session (the id from its footer). Use the same -Dir.
     [string]$Resume,
     [string]$Model = 'deepseek-flash[1m]',
+    # The model provider (launcher/providers.json): deepseek (the default), meta, xiaomi. DS_PROVIDER sets a default.
+    [string]$Provider = '',
+    # A provider's tier, e.g. contributor (Meta's training tier): only for projects the user opted in, in a clean checkout.
+    [string]$Tier = '',
     [ValidateSet('low', 'medium', 'high', 'xhigh', 'max')]
     [string]$Effort = 'max',
     [int]$MaxTurns = 60,
@@ -105,6 +119,8 @@ param(
     # Stop this worker once it has cost this many dollars (a nudge to wrap up comes at 75%). Overrides the
     # user's cap per worker (ds_spend.py set <dollars> --per run) for this run.
     [double]$MaxCost = 0,
+    # Set by the launcher itself on the one automatic resume after an API error; that launch never retries again.
+    [switch]$ApiRetry,
     [switch]$DryRun
 )
 
@@ -119,6 +135,18 @@ function Fail([string]$Message, [int]$Code = 2) {
 
 function Note([string]$Message) {
     [Console]::Error.WriteLine("[ds-agent] $Message")
+}
+
+# Every native call (python, git, taskkill, a child powershell) goes through this. Under 'Stop', Windows
+# PowerShell 5.1 turns a line the program writes to stderr (git's notes, a Python SystemExit message) into a
+# terminating error when stderr is redirected, and that kills the launcher mid-run. The block runs under
+# 'Continue', stderr lines captured with 2>&1 come back as plain text, and $LASTEXITCODE is the program's own.
+function Invoke-Native([scriptblock]$Block) {
+    $nativeEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & $Block | ForEach-Object { if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.ToString() } else { $_ } }
+    } finally { $ErrorActionPreference = $nativeEap }
 }
 
 # Quote one argument for the Windows command line (CommandLineToArgvW rules).
@@ -144,12 +172,34 @@ function Split-List([string]$Value) {
     return @($Value -split ',(?![^()]*\))' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 }
 
-# Override, then PATH, then the native installer, then the copy bundled with the Claude desktop app.
+# Override, then the path found last time, then PATH, then the native installer, then the copy bundled with
+# the Claude desktop app. The search costs about 120 ms (a failed Get-Command and a glob of Packages\Claude_*)
+# on every launch, so its answer is kept in ~/.claude-deepseek/claude-path.txt and reused while that file
+# still exists and the note is under a day old (a desktop app update adds a newer bundled version).
 function Find-Claude {
     if ($env:DEEPSEEK_AGENT_CLAUDE) {
         if (Test-Path -LiteralPath $env:DEEPSEEK_AGENT_CLAUDE -PathType Leaf) { return $env:DEEPSEEK_AGENT_CLAUDE }
         Fail "DEEPSEEK_AGENT_CLAUDE points at $($env:DEEPSEEK_AGENT_CLAUDE), which does not exist. Unset it to let the launcher find Claude Code itself."
     }
+    $cacheFile = Join-Path $workerHome 'claude-path.txt'
+    try {
+        $cacheInfo = Get-Item -LiteralPath $cacheFile -ErrorAction SilentlyContinue
+        if ($cacheInfo -and $cacheInfo.LastWriteTime -gt (Get-Date).AddDays(-1)) {
+            $cached = [IO.File]::ReadAllText($cacheFile).Trim()
+            if ($cached -and (Test-Path -LiteralPath $cached -PathType Leaf)) { return $cached }
+        }
+    } catch { }
+    $found = Search-Claude
+    if ($found) {
+        try {
+            New-Item -ItemType Directory -Force -Path $workerHome | Out-Null
+            [IO.File]::WriteAllText($cacheFile, $found, $utf8)
+        } catch { }
+    }
+    return $found
+}
+
+function Search-Claude {
     $onPath = Get-Command claude -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($onPath) { return $onPath.Source }
     $native = Join-Path $HOME '.local\bin\claude.exe'
@@ -167,6 +217,10 @@ function Find-Claude {
     return $null
 }
 
+$workerHome = Join-Path $HOME '.claude-deepseek'
+# Spend limits (launcher/ds_spend.py) cover every project, so their folder is per user, not per project.
+$spendDir = if ($env:DS_SPEND_DIR) { $env:DS_SPEND_DIR } else { Join-Path $workerHome 'spend' }
+
 # --- The brief ---
 if ($TaskFile) {
     if (-not (Test-Path -LiteralPath $TaskFile -PathType Leaf)) { Fail "Task file not found: $TaskFile" }
@@ -182,6 +236,75 @@ $Dir = (Resolve-Path -LiteralPath $Dir).ProviderPath
 
 # --- Project configuration ---
 $config = $null
+# --- Provider (launcher/providers.json, launcher/ds_providers.py) ---
+if (-not $Provider) { $Provider = if ($env:DS_PROVIDER) { $env:DS_PROVIDER } else { 'deepseek' } }
+# Python runs the provider, allowance, spend, steering and report helpers: looked up once, here.
+$python = (Get-Command python -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+$providerTool = Join-Path $PSScriptRoot 'ds_providers.py'
+# One Python process (launcher/ds_prepare.py) answers everything that doesn't wait on later launcher state: the
+# provider, its allowance's pace, and the report note and step budget for every kind. It was four processes,
+# about 70 ms each. Should it be missing or fail, each part falls back to its own call below.
+$prep = $null
+$prepareTool = Join-Path $PSScriptRoot 'ds_prepare.py'
+if ($python -and (Test-Path -LiteralPath $prepareTool)) {
+    # -S skips site-packages at start-up (about 7 ms): these helpers use only the standard library.
+    $prepArgs = @('-S', $prepareTool, '--provider', $Provider, '--dir', $Dir, '--spend-dir', $spendDir) + @(if ($Tier) { '--tier', $Tier })
+    $prepJson = ((Invoke-Native { & $python @prepArgs 2>$null }) | Out-String).Trim()
+    try { $prep = $prepJson | ConvertFrom-Json } catch { $prep = $null }
+    if ($prep -and -not $prep.provider) { $prep = $null }
+}
+if ($prep) {
+    $prov = $prep.provider
+    if ($prov.error) { Fail $prov.error }
+} elseif ($python -and (Test-Path -LiteralPath $providerTool)) {
+    # Build the arguments one by one: PowerShell drops an empty string argument to a native command.
+    $provArgs = @($providerTool, 'resolve', '--provider', $Provider, '--dir', $Dir) + @(if ($Tier) { '--tier', $Tier })
+    $provJson = ((Invoke-Native { & $python @provArgs 2>$null }) | Out-String).Trim()
+    try { $prov = $provJson | ConvertFrom-Json } catch { Fail "could not resolve provider '$Provider': $provJson" }
+    if ($prov.error) { Fail $prov.error }
+} elseif ($Provider -eq 'deepseek' -and -not $Tier) {
+    # Without Python (or ds_providers.py), DeepSeek still runs exactly as before providers existed.
+    $prov = [pscustomobject]@{ provider = 'deepseek'; name = 'DeepSeek'; baseUrl = 'https://api.deepseek.com/anthropic'; auth = 'api_key'
+        keyEnv = 'DEEPSEEK_API_KEY'; model = 'deepseek-flash[1m]'; smallModel = 'deepseek-flash'; maxOutputTokens = 128000
+        autoCompactWindow = 786432; balanceUrl = 'https://api.deepseek.com/user/balance'; keyPage = 'platform.deepseek.com'
+        efforts = [pscustomobject]@{ low = 'low'; medium = 'high'; high = 'high'; xhigh = 'max'; max = 'max' }; tier = 'standard'; contributor = $false }
+} else { Fail "provider '$Provider' needs Python and launcher/ds_providers.py" }
+# A provider that can't be trusted with images through Claude Code (MiMo, analysis-072-visual-mimo.1: 1-5 minutes of
+# thinking per step, images 'stripped from context' and a re-read file returning a different picture) gets no task
+# that works from image files.
+if ($prov.avoidImages -and $prompt -match '(?i)\.(png|jpe?g|webp|gif|bmp|tga|dds)') {
+    Fail "$($prov.name) can't be relied on with images through Claude Code, and this brief works from image files: run it on DeepSeek (-Provider deepseek)."
+}
+# A provider other than DeepSeek brings its own model, unless -Model names one.
+if ($prov.provider -ne 'deepseek' -and -not $PSBoundParameters.ContainsKey('Model')) { $Model = [string]$prov.model }
+
+# A training tier sees only the project's tracked files: the worker runs in a clean checkout of HEAD (no local/,
+# no build output, no untracked notes), without the project's reference folders, and -AddDir is refused.
+$contribCheckout = $null
+if ($prov.contributor) {
+    if ($AddDir) { Fail "a $($prov.name) $($prov.tier)-tier run may not read folders outside the project (-AddDir): use the standard tier" }
+    if ($Resume) { Fail "a $($prov.tier)-tier run cannot be resumed; start a new one" }
+    # git's notes on stderr are not failures (Invoke-Native).
+    $gitTop = (Invoke-Native { & git -C $Dir rev-parse --show-toplevel 2>$null })
+    if ($LASTEXITCODE -ne 0 -or -not $gitTop) { Fail "the $($prov.tier) tier needs a git project, so the worker can run in a checkout of its tracked files only" }
+    if (-not $env:DS_STATE_DIR) { $env:DS_STATE_DIR = [string](& (Join-Path $PSScriptRoot 'ds-state.ps1') -Dir $Dir) }
+    $contribRoot = Join-Path ([string](Split-Path -Parent ([string](Invoke-Native { & git -C $Dir rev-parse --path-format=absolute --git-common-dir 2>$null })).Trim())) 'local\contrib'
+    # Checkouts left by earlier runs that ended early: remove those over 12 hours old.
+    foreach ($old in @(Get-ChildItem -LiteralPath $contribRoot -Directory -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -lt (Get-Date).AddHours(-12) })) {
+        Invoke-Native { & git -C $Dir worktree remove --force $old.FullName 2>$null } | Out-Null
+    }
+    # A coder (tools/ds_impl.ps1) already works in a worktree of the tracked files, and its edits belong there.
+    $isCoderWorktree = $Dir -match '[\\/]local[\\/]impl[\\/][^\\/]+[\\/]?$'
+    $contribCheckout = if ($isCoderWorktree) { $null } else { Join-Path $contribRoot ("run-" + (Get-Date -Format 'yyyyMMdd-HHmmss') + "-$PID") }
+    if ($contribCheckout -and -not $DryRun) {
+        Invoke-Native { & git -C $Dir worktree add --detach $contribCheckout HEAD 2>&1 } | Out-Null
+        if (-not (Test-Path -LiteralPath $contribCheckout)) { Fail 'could not make the clean checkout for the contributor tier' }
+        $Dir = $contribCheckout
+    }
+    $global:LASTEXITCODE = 0
+    Note "$($prov.name) $($prov.tier) tier: the provider may train on what this worker sends, so it runs in a clean checkout of the tracked files, without reference folders"
+}
+
 $configPath = Join-Path $Dir '.deepseek-agents.json'
 if (Test-Path -LiteralPath $configPath) {
     try { $config = [IO.File]::ReadAllText($configPath, $utf8) | ConvertFrom-Json }
@@ -203,33 +326,82 @@ if ($config -and $config.defaults) {
     if ($d.timeoutMinutes -and -not $PSBoundParameters.ContainsKey('TimeoutMinutes')) { $TimeoutMinutes = [int]$d.timeoutMinutes }
 }
 
-# --- DeepSeek key: this process first, then the saved user variable, so a new key works without restarting anything ---
-$key = $env:DEEPSEEK_API_KEY
-if (-not $key) { $key = [Environment]::GetEnvironmentVariable('DEEPSEEK_API_KEY', 'User') }
-if (-not $key -and -not $DryRun) { Fail 'DEEPSEEK_API_KEY is not set (checked this process and your user environment variables).' }
+# --- The provider's key: this process first, then the saved user variable, so a new key works without restarting anything ---
+$keyEnv = [string]$prov.keyEnv
+$key = [Environment]::GetEnvironmentVariable($keyEnv, 'Process')
+if (-not $key) { $key = [Environment]::GetEnvironmentVariable($keyEnv, 'User') }
+if (-not $key -and -not $DryRun) {
+    Fail "$keyEnv is not set (checked this process and your user environment variables). $(if ($prov.provider -eq 'deepseek') { '' } else { "Save a $($prov.name) key from $($prov.keyPage) with tools/set-provider-key.ps1 -Provider $($prov.provider)$(if ($prov.tier -ne 'standard') { " -Tier $($prov.tier)" }); never paste it into a chat." })"
+}
 
-# Fail fast on a bad key or an empty balance; otherwise Claude Code retries the rejection for minutes.
+# Fail fast on a bad key or an empty balance; otherwise Claude Code retries the rejection for minutes. Only a
+# provider with a balance check (DeepSeek) has one; for the others a spend limit is the only budget guard.
+# The call checks two things: that the key is valid (a 401) and the balance. It costs about 760 ms cold, so a
+# DeepSeek reading under 5 minutes old and above $2, which ds_spend.py keeps in <spend>\balance.json, stands in
+# for it: a key problem is still caught within 5 minutes. DS_BALANCE_FRESH=1 always fetches. A saved reading is
+# not passed on to the spend check, which would save it again as new and keep it from ever going stale.
 $balanceUsd = $null
-if (-not $DryRun) {
+$balanceCached = $false
+if (-not $DryRun -and $prov.balanceUrl -and $prov.provider -eq 'deepseek' -and $env:DS_BALANCE_FRESH -ne '1') {
+    try {
+        $savedBalance = [IO.File]::ReadAllText((Join-Path $spendDir 'balance.json'), $utf8) | ConvertFrom-Json
+        # pwsh's ConvertFrom-Json has already made the time a [datetime]; Windows PowerShell leaves the text.
+        $savedAt = if ($savedBalance.at -is [datetime]) { [DateTimeOffset]$savedBalance.at } else { [DateTimeOffset]::Parse([string]$savedBalance.at, [Globalization.CultureInfo]::InvariantCulture) }
+        $savedAge = [DateTimeOffset]::Now - $savedAt
+        if ($savedAge.TotalMinutes -ge 0 -and $savedAge.TotalMinutes -lt 5 -and $savedBalance.available -ne $false -and [double]$savedBalance.usd -gt 2) {
+            $balanceCached = $true
+        }
+    } catch { }
+}
+if (-not $DryRun -and $prov.balanceUrl -and -not $balanceCached) {
     $keyProblem = $null
     try {
-        $balance = Invoke-RestMethod -Uri 'https://api.deepseek.com/user/balance' -Headers @{ Authorization = "Bearer $key" } -TimeoutSec 20
-        if ($balance.is_available -eq $false) { $keyProblem = 'Your DeepSeek balance is too low for API calls. Top up at platform.deepseek.com.' }
+        $balance = Invoke-RestMethod -Uri ([string]$prov.balanceUrl) -Headers @{ Authorization = "Bearer $key" } -TimeoutSec 20
+        if ($balance.is_available -eq $false) { $keyProblem = "Your $($prov.name) balance is too low for API calls. Top up at $($prov.keyPage)." }
         $usd = @($balance.balance_infos | Where-Object { $_.currency -eq 'USD' }) | Select-Object -First 1
         if ($usd) { $balanceUsd = [double]$usd.total_balance }
     } catch {
-        if ($_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 401) { $keyProblem = 'DeepSeek rejected DEEPSEEK_API_KEY (401). Check the key.' }
+        if ($_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 401) { $keyProblem = "$($prov.name) rejected $keyEnv (401). Check the key." }
         # Any other failure (network, endpoint change): carry on and let the worker report it.
     }
     if ($keyProblem) { Fail $keyProblem }
 }
 
-# --- Effort: DeepSeek has three thinking levels (low, high, max). medium and xhigh are still accepted,
-# so old commands and configs keep working, but they are sent as the level DeepSeek would run anyway
-# (its docs map medium to high and xhigh to max), and the manifest records what actually ran. ---
+# --- A plan with a fixed allowance (MiMo's Token Plan): no provider reports what is left, so the harness paces
+# what its own workers used against an even share of the plan period (launcher/ds_allowance.py). ---
+$allowanceTool = Join-Path $PSScriptRoot 'ds_allowance.py'
+if ($prov.allowance -and $python -and ($prep -or (Test-Path -LiteralPath $allowanceTool))) {
+    $allow = $null
+    if ($prep) { $allow = $prep.allowance }
+    else {
+        $allowJson = ((Invoke-Native { & $python $allowanceTool status --provider ([string]$prov.provider) --tier ([string]$prov.tier) 2>$null }) | Out-String).Trim()
+        try { $allow = $allowJson | ConvertFrom-Json } catch { }
+    }
+    if ($allow -and $allow.configured) {
+        $pct = '{0:N1}%' -f (100 * [double]$allow.share)
+        if ($allow.level -eq 'hold') {
+            $again = if ($allow.again) { " It is back on pace about $(([datetime]$allow.again).ToString('ddd dd MMM HH:mm'))." } else { " It renews $(([datetime]$allow.resets).ToString('ddd dd MMM'))." }
+            if (-not $DryRun) { Fail "$($prov.name) $($prov.tier): $pct of this period's allowance is used, well ahead of an even pace, so new work waits.$again Run it on DeepSeek (-Provider deepseek) or as a Claude subagent on Sonnet 5.5 instead." 4 }
+        } elseif ($allow.level -eq 'ease') {
+            Note "$($prov.name) $($prov.tier): $pct of this period's allowance is used, ahead of an even pace: prefer DeepSeek for big jobs until it catches up"
+        }
+    } elseif ($allow -and -not $allow.configured) {
+        Note "$($prov.name) $($prov.tier) has an allowance but no plan is recorded, so it is not paced: set it in ~/.claude-deepseek/providers.json ("plans")"
+    }
+}
+
+# --- Effort: each provider has its own levels (providers.json "efforts"). DeepSeek has three (low, high, max):
+# medium and xhigh are still accepted, so old commands and configs keep working, but they are sent as the level
+# DeepSeek would run anyway, and the manifest records what actually ran. A provider with no levels listed gets
+# none sent (its support is unverified), and one with "thinking": false runs without thinking. ---
 $effortRequested = $Effort
-$Effort = switch ($Effort) { 'medium' { 'high' } 'xhigh' { 'max' } default { $Effort } }
-if ($Effort -ne $effortRequested) { Note "effort $effortRequested runs as $Effort on DeepSeek (its levels are low, high and max)" }
+$effortSent = $null
+if ($prov.efforts) {
+    $mapped = $prov.efforts.$Effort
+    if ($mapped) { $Effort = [string]$mapped }
+    $effortSent = $Effort
+    if ($Effort -ne $effortRequested) { Note "effort $effortRequested runs as $Effort on $($prov.name)" }
+}
 
 # --- Delegation level 1-5 (tools/ds_delegation.py): DS_DELEGATION_LEVEL, then the project config, then the
 # user's, else 3. An old 0-10 "delegation" value (or DS_DELEGATION) at the same place is mapped onto 1-5.
@@ -255,7 +427,8 @@ if (-not $claude) { Fail 'Claude Code was not found. Install the Claude Code CLI
 
 # --- Read-only folders ---
 $readOnlyDirs = @()
-foreach ($candidate in (@(Split-List $AddDir) + @($config.readOnlyDirs))) {
+# A training-tier run reads nothing beyond the clean checkout: the project's reference folders stay out too.
+foreach ($candidate in $(if ($prov.contributor) { @() } else { @(Split-List $AddDir) + @($config.readOnlyDirs) })) {
     if (-not $candidate) { continue }
     if (-not (Test-Path -LiteralPath $candidate -PathType Container)) { Note "read-only folder not found, skipped: $candidate"; continue }
     $full = (Resolve-Path -LiteralPath $candidate).ProviderPath
@@ -336,9 +509,9 @@ $permissionMode = if ($Mode -eq 'edit') { 'acceptEdits' } else { 'dontAsk' }
 $webExposed = [bool]$ownWeb -or $env:DS_WEB_EXPOSED -eq '1'
 if ($env:DS_WEB_EDIT -eq '1') { $WebEdit = [switch]$true }
 function Test-IsolatedWorktree([string]$Path) {
-    $gitDir = & git -C $Path rev-parse --absolute-git-dir 2>$null
+    $gitDir = Invoke-Native { & git -C $Path rev-parse --absolute-git-dir 2>$null }
     if ($LASTEXITCODE -ne 0 -or -not $gitDir) { return $false }
-    $common = & git -C $Path rev-parse --path-format=absolute --git-common-dir 2>$null
+    $common = Invoke-Native { & git -C $Path rev-parse --path-format=absolute --git-common-dir 2>$null }
     if ($LASTEXITCODE -ne 0 -or -not $common) { return $false }
     return ([IO.Path]::GetFullPath($gitDir.Trim()).TrimEnd('\', '/') -ne [IO.Path]::GetFullPath($common.Trim()).TrimEnd('\', '/'))
 }
@@ -385,9 +558,9 @@ if (-not $DryRun) {
         $fullState = [IO.Path]::GetFullPath($stateDir); $fullDir = [IO.Path]::GetFullPath($Dir).TrimEnd('\') + '\'
         if ($fullState.StartsWith($fullDir, [StringComparison]::OrdinalIgnoreCase)) {
             $relState = $fullState.Substring($fullDir.Length) -replace '\\', '/'
-            & git -C $Dir check-ignore -q -- $relState 2>$null
+            Invoke-Native { & git -C $Dir check-ignore -q -- $relState 2>$null }
             if ($LASTEXITCODE -eq 1) {        # 1: a git project that doesn't ignore it (128: not a git project)
-                $common = (& git -C $Dir rev-parse --path-format=absolute --git-common-dir 2>$null)
+                $common = (Invoke-Native { & git -C $Dir rev-parse --path-format=absolute --git-common-dir 2>$null })
                 if ($common) {
                     $exclude = Join-Path $common.Trim() 'info\exclude'
                     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $exclude) | Out-Null
@@ -491,9 +664,6 @@ if ($resumed) {
 $lineage += $runId
 $runDir = Join-Path $stateDir "runs\$runId"
 
-$workerHome = Join-Path $HOME '.claude-deepseek'
-# Spend limits (launcher/ds_spend.py) cover every project, so their folder is per user, not per project.
-$spendDir = if ($env:DS_SPEND_DIR) { $env:DS_SPEND_DIR } else { Join-Path $workerHome 'spend' }
 # A websearch worker starts in an empty folder of its own: Claude Code loads CLAUDE.md and AGENTS.md from
 # the folder it starts in, and a web-facing worker should carry no project instructions or paths.
 $startDir = $Dir
@@ -515,7 +685,6 @@ $crosstalkOn = $true
 if ($config -and $config.PSObject.Properties['crosstalk'] -and $config.crosstalk -eq $false) { $crosstalkOn = $false }
 if ($NoCrosstalk) { $crosstalkOn = $false }
 if ($Crosstalk) { $crosstalkOn = $true }
-$python = (Get-Command python -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1).Source
 
 # --- Spend limit and pace (launcher/ds_spend.py): the user's daily or weekly DeepSeek budget, and the
 # balance, checked like Claude's own usage limits. A worker that would not fit does not start; one that is
@@ -525,16 +694,18 @@ $spendTool = Join-Path $PSScriptRoot 'ds_spend.py'
 $spendOn = $python -and (Test-Path -LiteralPath $spendTool)
 $spendNote = $null; $spendRefused = $false; $spendPlan = $null
 if ($spendOn) {
-    $checkArgs = @($spendTool, '--dir', $spendDir, 'check', '--kind', $Kind, '--json', '--run-id', $runId, '--pid', [string]$PID, '--lineage', $lineage)
+    $checkArgs = @('-S', $spendTool, '--dir', $spendDir, 'check', '--kind', $Kind, '--json', '--run-id', $runId, '--pid', [string]$PID, '--lineage', $lineage)
+    # Each provider has its own limits and pace: DeepSeek's daily limit never holds a MiMo or Muse run (2026-09-29).
+    if ($prov.provider -and $prov.provider -ne 'deepseek') { $checkArgs += @('--provider', [string]$prov.provider) }
     if ($null -ne $balanceUsd) { $checkArgs += @('--balance', [string]$balanceUsd) }
     if (-not $DryRun) { $checkArgs += '--claim' }
     $waitUntil = (Get-Date).AddMinutes(20)
     $waitNoted = $false
     while ($true) {
-        $spendRaw = (& $python @checkArgs 2>&1 | Out-String).Trim()
+        $spendRaw = (Invoke-Native { & $python @checkArgs 2>&1 } | Out-String).Trim()
         try { $spendPlan = $spendRaw | ConvertFrom-Json } catch { Note "the spend check failed, so it is skipped: $spendRaw"; $spendPlan = $null; break }
         if (-not $spendPlan.wait -or $DryRun) { break }
-        if (-not $waitNoted) { Note "$($spendPlan.lines -join ' ') Waiting for the other DeepSeek workers to finish (up to 20 minutes)."; $waitNoted = $true }
+        if (-not $waitNoted) { Note "$($spendPlan.lines -join ' ') Waiting for the other $($prov.name) workers to finish (up to 20 minutes)."; $waitNoted = $true }
         Start-Sleep -Seconds 10
         if ((Get-Date) -gt $waitUntil) { $checkArgs += '--waited' }
     }
@@ -546,7 +717,7 @@ if ($spendOn) {
         # Easing off: the cap applies even to an explicit -Effort, since the budget is the user's.
         $order = @('low', 'high', 'max')
         if ($spendPlan.effort_cap -and $order.IndexOf($Effort) -gt $order.IndexOf([string]$spendPlan.effort_cap)) {
-            Note "effort $Effort runs as $($spendPlan.effort_cap) while DeepSeek spending is ahead of pace"
+            Note "effort $Effort runs as $($spendPlan.effort_cap) while $($prov.name) spending is ahead of pace"
             $Effort = [string]$spendPlan.effort_cap
         }
         if ($spendPlan.ease -gt 0) { $delegation = [Math]::Max(1, $delegation - 1) }
@@ -613,6 +784,39 @@ if ($unrunnable) {
         Note "the brief names commands this worker may not run: $($unrunnable -join '; '). Add -AllowTools rules for them (or project allowTools), or change the brief."
     }
 }
+# --- Brief against reachable files: a worker reads only its own folder and the -AddDir / readOnlyDirs folders
+# (blockReadsOutsideWorkingDirectories). A coder in a ds_impl worktree could not read the review it was fixing, under
+# the project's local/agents/runs, and another could not read an emulator save folder on D:\ (DOA, 2026-09-29). Warn
+# about paths the brief names that exist but that the worker can't reach; paths that don't exist are skipped. ---
+if (-not $isWebsearch) {
+    $named = @()
+    # Absolute Windows paths: whole when in backticks or quotes (they may hold spaces), else up to the next space.
+    foreach ($m in [regex]::Matches($prompt, '`([A-Za-z]:[\\/][^`\r\n]*)`|"([A-Za-z]:[\\/][^"\r\n]*)"|''([A-Za-z]:[\\/][^''\r\n]*)''|(?<![\w/\\])([A-Za-z]:[\\/][^\s`"''<>|*?]*)')) {
+        $named += @(@($m.Groups[1], $m.Groups[2], $m.Groups[3], $m.Groups[4]) | Where-Object { $_.Success } | ForEach-Object { $_.Value })[0]
+    }
+    # A ds_impl coder's worktree (<project>\local\impl\<task>) has no local\ of its own: local/... means the project's.
+    if ($Dir -match '[\\/]local[\\/]impl[\\/][^\\/]+[\\/]?$') {
+        $projectRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $Dir.TrimEnd('\', '/')))
+        foreach ($m in [regex]::Matches($prompt, '(?<![\w./\\:-])(local[\\/][^\s`"''<>|*?]+)')) {
+            if (-not (Test-Path -LiteralPath (Join-Path $Dir $m.Groups[1].Value))) { $named += (Join-Path $projectRoot $m.Groups[1].Value) }
+        }
+    }
+    $unreachable = @()
+    foreach ($p in @($named | Select-Object -Unique)) {
+        $p = $p.Trim().TrimEnd('.', ',', ';', ':', ')', ']', '}')
+        try { $full = [IO.Path]::GetFullPath($p) } catch { continue }
+        if (-not (Test-Path -LiteralPath $full)) { continue }
+        $inside = $false
+        foreach ($root in @($Dir) + @($readOnlyDirs)) {
+            $prefix = [IO.Path]::GetFullPath($root).TrimEnd('\', '/') + '\'
+            if (($full.TrimEnd('\', '/') + '\').StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { $inside = $true; break }
+        }
+        if (-not $inside -and $unreachable -notcontains $full) { $unreachable += $full }
+    }
+    if ($unreachable) {
+        Note "the brief names paths this worker can't read, outside its folder and every -AddDir folder: $($unreachable -join '; '). Paste what it needs from them into the brief, or pass -AddDir <folder> so it may read them."
+    }
+}
 # --- Brief sections: without "Done when" and "Report" the worker guesses when to stop and what to return
 # (30 of 54 OpenSkyrim briefs had no "Done when", 20 no "Scope", 2026-09-25). Templates per kind are in
 # this skill's templates/ folder. Inline -Task briefs (the reviews ds_impl suggests) are not checked. ---
@@ -647,9 +851,7 @@ if ($Kind -eq 'research' -and -not $Resume) {
             [IO.File]::WriteAllText($wsBrief, $wsText, $utf8)
             Write-Output "[ds-agent] web first: $wsLabel is answering the brief's web questions"
             # The child's notes arrive on stderr, which 'Stop' would turn into a fatal error (research-063).
-            $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-            $wsOut = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $PSCommandPath -Kind websearch -Label $wsLabel -TaskFile $wsBrief -Dir $Dir -MaxTurns 25 2>&1 | Out-String
-            $ErrorActionPreference = $eap
+            $wsOut = Invoke-Native { & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $PSCommandPath -Kind websearch -Label $wsLabel -TaskFile $wsBrief -Dir $Dir -MaxTurns 25 2>&1 } | Out-String
             Remove-Item -LiteralPath $wsBrief -ErrorAction SilentlyContinue
             $wsRun = Get-ChildItem -LiteralPath (Join-Path $stateDir 'runs') -Directory -Filter "$wsLabel.*" -ErrorAction SilentlyContinue |
                 Sort-Object LastWriteTime -Descending | Select-Object -First 1
@@ -688,19 +890,27 @@ $steerOn = $python -and (Test-Path -LiteralPath $steerTool)
 # details. The launcher prints only the opening and the report's path, so Claude reads a few lines.
 $envelopeTool = Join-Path $PSScriptRoot 'ds_envelope.py'
 $envelopeOn = $python -and (Test-Path -LiteralPath $envelopeTool) -and -not $Schema
-$envelopeNote = if ($envelopeOn) { ((& $python $envelopeTool note --kind $Kind 2>$null) | Out-String).Trim() } else { '' }
+$envelopeNote = ''
+if ($envelopeOn) {
+    if ($prep -and $prep.notes -and $prep.notes.PSObject.Properties[$Kind]) { $envelopeNote = [string]$prep.notes.$Kind }
+    else { $envelopeNote = ((Invoke-Native { & $python $envelopeTool note --kind $Kind 2>$null }) | Out-String).Trim() }
+}
 $stepBudget = 0
 if ($steerOn) {
-    $budgetArgs = @($steerTool, 'budget', '--kind', $Kind)
-    if ($spendDir) { $budgetArgs += @('--spend-dir', $spendDir) }
-    [int]::TryParse(((& $python @budgetArgs 2>$null) | Out-String).Trim(), [ref]$stepBudget) | Out-Null
+    if ($prep -and $prep.budgets -and $prep.budgets.PSObject.Properties[$Kind]) { $stepBudget = [int]$prep.budgets.$Kind }
+    else {
+        $budgetArgs = @($steerTool, 'budget', '--kind', $Kind)
+        if ($spendDir) { $budgetArgs += @('--spend-dir', $spendDir) }
+        [int]::TryParse(((Invoke-Native { & $python @budgetArgs 2>$null }) | Out-String).Trim(), [ref]$stepBudget) | Out-Null
+    }
 }
 if ($steerOn) {
-    $hookCommand = '"{0}" "{1}" deliver --run-dir "{2}"' -f ($python -replace '\\', '/'), ($steerTool -replace '\\', '/'), ($runDir -replace '\\', '/')
+    # -S skips site-packages at start-up: deliver uses only the standard library and runs after every tool call.
+    $hookCommand = '"{0}" -S "{1}" deliver --run-dir "{2}"' -f ($python -replace '\\', '/'), ($steerTool -replace '\\', '/'), ($runDir -replace '\\', '/')
     $settings['hooks'] = @{ PostToolUse = @(@{ matcher = '*'; hooks = @(@{ type = 'command'; command = $hookCommand; timeout = 10 }) }) }
 }
 
-$leadName = if ($Parent) { "the DeepSeek lead $Parent" } else { 'Claude' }
+$leadName = if ($Parent) { "the lead worker $Parent" } else { 'Claude' }
 $note = @(
     "You are worker $runId ($Kind): $($Title.TrimEnd('.')). $leadName delegated this task to you and will review your work."
     'You cannot ask questions: when something is ambiguous, make the most reasonable choice and say so in your report.'
@@ -748,7 +958,7 @@ if ($shellRules) {
     $note += "Shell commands you may run, and only these (* stands for any arguments): $($shellRules -join '; '). You start in the right folder, so no cd is needed. Plain read-only commands (git status, git log, git diff, grep, ls, sed -n, head, tail, wc) run too, alone or ending in a single | head or | tail. Loops, chains of several commands, awk and inline python -c are refused: write a small script and run it with python instead. A refused command means that exact form is not on the list, not that the tool is missing: use a listed form (for Rust, cargo check or cargo test with your crate) rather than concluding you cannot build or test. Run builds and tests in the foreground with the Bash timeout raised (up to 600000 ms, ten minutes), so you get the result the moment it finishes. Only a job longer than that goes in the background, and then check on it about once a minute: never sleep for several minutes at a time, because a sleep cannot end early when the build does."
 }
 if ($spendPlan -and $spendPlan.ease -gt 0) {
-    $note += "The user's DeepSeek budget is running ahead of pace. Finish in as few steps as you can: read only what the task needs, don't explore beyond it, and report what you have rather than doing extra checks.$(if ($CanSpawn) { ' Start workers only where they save real work, keep them small, and do small things yourself.' })"
+    $note += "The user's $($prov.name) budget is running ahead of pace. Finish in as few steps as you can: read only what the task needs, don't explore beyond it, and report what you have rather than doing extra checks.$(if ($CanSpawn) { ' Start workers only where they save real work, keep them small, and do small things yourself.' })"
 }
 $note += 'When the task is done, write your report and stop. Leftover steps or budget are not a reason to add checks or extras nobody asked for: an extra step costs the user money and can lose the work you already have.'
 $note += 'Keep your context lean: everything you read stays in it and is paid for again on every later step. Search before you read, read the part of a file you need (offset and limit) rather than the whole of a large one, and cut long command output to what matters (the tail of a build log, the failing tests) instead of printing all of it.'
@@ -782,11 +992,14 @@ else { $sessionId = [guid]::NewGuid().ToString(); $cliArgs += '--session-id', $s
 
 $commandLine = ($cliArgs | ForEach-Object { ConvertTo-WinArg $_ }) -join ' '
 
-# --- Worker environment (DeepSeek's recommended Claude Code settings) ---
+# --- Worker environment (the provider's recommended Claude Code settings; every model alias pinned to the
+# provider's model, so Claude Code never falls back to a Claude model) ---
 $baseModel = $Model -replace '\[1m\]$', ''
+if ($prov.provider -ne 'deepseek' -and $prov.smallModel -and -not $PSBoundParameters.ContainsKey('Model')) { $baseModel = [string]$prov.smallModel }
+$keyVar = if ($prov.auth -eq 'auth_token') { 'ANTHROPIC_AUTH_TOKEN' } else { 'ANTHROPIC_API_KEY' }
 $workerEnv = [ordered]@{
-    ANTHROPIC_BASE_URL                       = 'https://api.deepseek.com/anthropic'
-    ANTHROPIC_API_KEY                        = $key
+    ANTHROPIC_BASE_URL                       = [string]$prov.baseUrl
+    $keyVar                                  = $key
     ANTHROPIC_MODEL                          = $Model
     ANTHROPIC_DEFAULT_OPUS_MODEL             = $Model
     ANTHROPIC_DEFAULT_SONNET_MODEL           = $Model
@@ -794,11 +1007,10 @@ $workerEnv = [ordered]@{
     CLAUDE_CODE_SUBAGENT_MODEL               = $baseModel
     # Without this a subagent asked for "opus" could reach DeepSeek's Pro model instead.
     CLAUDE_CODE_SUBAGENT_MODEL_FORCE         = '1'
-    CLAUDE_CODE_EFFORT_LEVEL                 = $Effort
     # Claude Code otherwise sends max_tokens 32000, and a hard step at max effort can spend all of it
     # thinking and return nothing (a 107k-token correct answer in docs/design/effort.md). 128000 is the
     # most Claude Code will send; DeepSeek Flash allows 384k.
-    CLAUDE_CODE_MAX_OUTPUT_TOKENS            = '128000'
+    CLAUDE_CODE_MAX_OUTPUT_TOKENS            = [string]$(if ($prov.maxOutputTokens) { $prov.maxOutputTokens } else { 128000 })
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = '1'
     CLAUDE_CONFIG_DIR                        = $workerHome
     # Lineage for anything this worker launches (ds-spawn.ps1 and this script read these).
@@ -813,7 +1025,16 @@ $workerEnv = [ordered]@{
 }
 if ($webExposed) { $workerEnv['DS_WEB_EXPOSED'] = '1' }
 if ($WebEdit) { $workerEnv['DS_WEB_EDIT'] = '1' }
-if ($Model -ne $baseModel) { $workerEnv['CLAUDE_CODE_AUTO_COMPACT_WINDOW'] = '786432' }
+if ($Model -ne $baseModel -and $prov.autoCompactWindow) { $workerEnv['CLAUDE_CODE_AUTO_COMPACT_WINDOW'] = [string]$prov.autoCompactWindow }
+# The effort as it stands now, after the reading-job default and the pace cap, mapped to the provider's levels:
+# $effortSent was worked out before those, so a DeepSeek research worker was sent max while the launcher said high.
+if ($effortSent) {
+    $effortSent = if ($prov.efforts -and $prov.efforts.$Effort) { [string]$prov.efforts.$Effort } else { $Effort }
+    $workerEnv['CLAUDE_CODE_EFFORT_LEVEL'] = $effortSent
+}
+# DS_PROVIDER_THINKING=1 runs a provider with thinking anyway, to test whether it works (MiMo, 2026-09-27).
+if ($prov.thinking -eq $false -and $env:DS_PROVIDER_THINKING -ne '1') { $workerEnv['MAX_THINKING_TOKENS'] = '0' }
+if ($prov.env) { foreach ($e in $prov.env.PSObject.Properties) { $workerEnv[$e.Name] = [string]$e.Value } }
 # In-process subagents nest one level at most: the process tree is the hierarchy we manage.
 if ($SubAgents) { $workerEnv['CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH'] = '1' }
 if ($CanSpawn) {
@@ -839,7 +1060,7 @@ if ($DryRun) {
     "settings:  $($settings | ConvertTo-Json -Depth 8 -Compress)"
     "args:      $commandLine"
     foreach ($name in $workerEnv.Keys) {
-        $value = if ($name -eq 'ANTHROPIC_API_KEY') { if ($key) { '(set)' } else { '(missing)' } } else { $workerEnv[$name] }
+        $value = if ($name -in 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN') { if ($key) { '(set)' } else { '(missing)' } } else { $workerEnv[$name] }
         "env:       $name=$value"
     }
     if ($webFirst) { "web first: $webFirst" }
@@ -887,6 +1108,7 @@ $manifest = [ordered]@{
     lineage = $lineage; depth = $depth
     state = 'submitted'
     mode = $Mode; model = $Model; effort = $Effort; effort_requested = $effortRequested; max_turns = $MaxTurns
+    provider = [string]$prov.provider; tier = [string]$prov.tier
     crosstalk = [bool]$crosstalkOn; subagents = [bool]$SubAgents; can_spawn = [bool]$CanSpawn
     delegation = $delegation; forced = [bool]$Force; web_exposed = $webExposed; web_edit = [bool]$WebEdit
     brief = $(if ($TaskFile) { (Resolve-Path -LiteralPath $TaskFile).ProviderPath } else { '(inline)' })
@@ -896,6 +1118,9 @@ $manifest = [ordered]@{
     turns = $null; tokens_in = $null; tokens_out = $null; denied = @()
     report = (Join-Path $runDir 'report.md'); error = $null
 }
+# The automatic resumes after an API error, across the whole run.
+if ($ApiRetry) { $manifest['api_retries'] = 1 + [int]$resumed.api_retries }
+elseif ($resumed -and $resumed.api_retries) { $manifest['api_retries'] = [int]$resumed.api_retries }
 # Subagent usage is filled in after the run; zero until then, so every -SubAgents record has the fields.
 if ($SubAgents) { $manifest['subagents_run'] = 0; $manifest['subagent_tokens_in'] = 0; $manifest['subagent_tokens_out'] = 0 }
 function Save-Manifest([string]$Event) {
@@ -926,14 +1151,23 @@ foreach ($orphan in @(Get-ChildItem -LiteralPath $stateDir -Filter '*.json' -Fil
         if (Test-Path -LiteralPath $orphanFile) {
             $om = [IO.File]::ReadAllText($orphanFile, $utf8) | ConvertFrom-Json
             if ($om.state -eq 'working' -or $om.state -eq 'submitted') {
+                # Keep what the worker had written, as the launcher's own timeout does (ds_envelope.py partial): a launcher
+                # killed from outside (`timeout 5400 powershell ...`, DOA 2026-09-29) left no report at all.
+                $keptAt = $null
+                if ($python -and $om.state -eq 'working' -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'ds_envelope.py'))) {
+                    $keptAt = ((Invoke-Native { & $python -S (Join-Path $PSScriptRoot 'ds_envelope.py') partial --manifest $orphanFile `
+                        --why "its launcher was stopped from outside before the worker reported; this is what it had written" 2>$null }) | Out-String).Trim()
+                    if ($LASTEXITCODE -ne 0) { $keptAt = $null }
+                    $global:LASTEXITCODE = 0
+                }
                 $om.state = 'canceled'
                 $om.ended = (Get-Date).ToString('s')
-                $om.error = "its launcher stopped without recording an end (found by $runId); the worker process $($o.pid) is gone"
+                $om.error = "its launcher stopped without recording an end (found by $runId); the worker process $($o.pid) is gone$(if ($keptAt) { "; its partial output is in $keptAt" })"
                 [IO.File]::WriteAllText($orphanFile, ($om | ConvertTo-Json -Depth 5), $utf8)
                 $line = [ordered]@{ event = 'end'; at = (Get-Date).ToString('s') }
                 foreach ($prop in $om.PSObject.Properties) { $line[$prop.Name] = $prop.Value }
                 [IO.File]::AppendAllText($manifestLog, (($line | ConvertTo-Json -Depth 5 -Compress) + "`n"), $utf8)
-                Note "closed $($o.run_id) as canceled: its launcher died without recording an end"
+                Note "closed $($o.run_id) as canceled: its launcher died without recording an end$(if ($keptAt) { "; kept its partial output in $keptAt" })"
             }
         }
         Remove-Item -LiteralPath $orphan.FullName -ErrorAction SilentlyContinue
@@ -1005,31 +1239,60 @@ try {
     $proc.StandardInput.Close()
 
     $deadline = $started.AddMinutes($TimeoutMinutes)
+    # At 75% of the timeout the worker is told to finish the change in hand and report (ds_steer.py time_nudge), so it
+    # isn't stopped mid-edit with nothing reported (a DOA coder hit its 90 minutes that way, 2026-09-29).
+    $timeArgs = @(if ($TimeoutMinutes -gt 0) { '--deadline', $deadline.ToString('o'), '--timeout-minutes', [string]$TimeoutMinutes })
     $spendStop = $null
     while (-not $proc.HasExited -and (Get-Date) -lt $deadline) {
         $wait = [Math]::Max(1, [Math]::Min(15000, [int]($deadline - (Get-Date)).TotalMilliseconds))
         if ($proc.WaitForExit($wait)) { break }
-        if ($steerOn -and (Test-Path -LiteralPath $state.transcript)) {
+        if (-not (Test-Path -LiteralPath $state.transcript)) { continue }
+        if ($spendOn) {
+            # The nudges (ds_steer.py watch) and the spend so far (ds_spend.py live) in one process, which reads only
+            # the transcript lines added since the last poll (offsets and running totals in <run>\poll.json). Two
+            # processes took 172 ms a poll on a 0.9 MB transcript and 672 ms at 50 MB; one poll takes about 100 ms
+            # once the transcript has been read once (2026-09-29).
+            $pollArgs = @('-S', $spendTool, '--dir', $spendDir, 'poll', '--run-id', $runId, '--transcript', $state.transcript,
+                '--since', $started.ToString('o'), '--pid', [string]$PID, '--kind', $Kind, '--run-dir', $runDir,
+                '--provider', [string]$prov.provider, '--tier', [string]$prov.tier)
+            if ($MaxCost -gt 0) { $pollArgs += @('--run-cap', [string]$MaxCost) }
+            if ($steerOn -and $stepBudget -gt 0) { $pollArgs += @('--budget', [string]$stepBudget) }
+            if ($steerOn) { $pollArgs += $timeArgs }
+            if (-not $steerOn) { $pollArgs += '--no-steer' }
+            $pollOut = (Invoke-Native { & $python @pollArgs 2>$null } | Out-String).Trim()
+            $pollCode = $LASTEXITCODE
+            $polled = $null
+            try { $polled = $pollOut | ConvertFrom-Json } catch { }
+            foreach ($nudgeKey in @($polled.nudged)) { if ($nudgeKey) { Note "nudged the worker: $nudgeKey" } }
+            if ($pollCode -eq 3) { $spendStop = if ($polled -and $polled.stop) { [string]$polled.stop } else { $pollOut }; break }
+            # Anything but 0 or 3 is the poll itself failing: do this round the old way, one process per job.
+            if ($pollCode -eq 0) { continue }
+        }
+        if ($steerOn) {
             $watchArgs = @($steerTool, 'watch', '--transcript', $state.transcript, '--since', $started.ToString('o'), '--run-dir', $runDir)
             if ($stepBudget -gt 0) { $watchArgs += @('--budget', [string]$stepBudget) }
-            $fired = @(& $python @watchArgs 2>$null)
+            $watchArgs += $timeArgs
+            $fired = @(Invoke-Native { & $python @watchArgs 2>$null })
             foreach ($key in $fired) { if ($key) { Note "nudged the worker: $key" } }
         }
-        if ($spendOn -and (Test-Path -LiteralPath $state.transcript)) {
+        if ($spendOn) {
             $liveArgs = @($spendTool, '--dir', $spendDir, 'live', '--run-id', $runId, '--transcript', $state.transcript,
-                '--since', $started.ToString('o'), '--pid', [string]$PID, '--kind', $Kind, '--run-dir', $runDir)
+                '--since', $started.ToString('o'), '--pid', [string]$PID, '--kind', $Kind, '--run-dir', $runDir,
+                '--provider', [string]$prov.provider, '--tier', [string]$prov.tier)
             if ($MaxCost -gt 0) { $liveArgs += @('--run-cap', [string]$MaxCost) }
-            $liveOut = (& $python @liveArgs 2>&1 | Out-String).Trim()
+            $liveOut = (Invoke-Native { & $python @liveArgs 2>&1 } | Out-String).Trim()
             if ($LASTEXITCODE -eq 3) { $spendStop = $liveOut; break }
         }
     }
     if (-not $proc.HasExited) {
-        & taskkill.exe /PID $proc.Id /T /F | Out-Null
+        Invoke-Native { & taskkill.exe /PID $proc.Id /T /F } | Out-Null
         $timedOut = $true
     } else {
         $proc.WaitForExit()
         $raw = $reading.Result
         $exitCode = $proc.ExitCode
+        # The launcher's own exit code says only that the worker failed (1); its code is kept here.
+        $manifest['worker_exit_code'] = $exitCode
         # Pass the worker's own error output on, as before, and keep its last line for the manifest.
         $errText = [string]$readingErr.Result
         if ($errText.Trim()) {
@@ -1040,12 +1303,17 @@ try {
     }
 }
 finally {
-    if ($proc -and -not $proc.HasExited) { & taskkill.exe /PID $proc.Id /T /F 2>$null | Out-Null }
+    if ($proc -and -not $proc.HasExited) { Invoke-Native { & taskkill.exe /PID $proc.Id /T /F 2>$null } | Out-Null }
     Remove-Item -LiteralPath $stateFile -ErrorAction SilentlyContinue
     foreach ($name in $workerEnv.Keys) { Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue }
     foreach ($name in $saved.Keys) { Set-Item -LiteralPath "Env:$name" -Value $saved[$name] }
     # Stopped from outside (Ctrl+C, a killed launcher): record it rather than leave the run "working".
     if (-not $timedOut -and $null -eq $exitCode -and $manifest.state -eq 'working') {
+        # Best effort: keep what the worker had written (ds_envelope.py partial), as a timeout does.
+        if ($python) {
+            Invoke-Native { & $python -S (Join-Path $PSScriptRoot 'ds_envelope.py') partial --manifest (Join-Path $runDir 'manifest.json') `
+                --why "the launcher was stopped before the worker reported; this is what it had written" 2>$null } | Out-Null
+        }
         Complete-Manifest 'canceled' 'the launcher stopped before the worker finished'
     }
     # The worker never started (claude.exe would not launch): record it, don't leave it "submitted".
@@ -1055,8 +1323,12 @@ finally {
 }
 
 if ($spendOn -and $state.transcript -and (Test-Path -LiteralPath $state.transcript)) {
-    $spentHere = (& $python $spendTool --dir $spendDir record --run-id $runId --transcript $state.transcript `
-        --since $started.ToString('o') --kind $Kind --effort $Effort --project (Split-Path -Leaf $Dir) 2>&1 | Out-String).Trim()
+    # The result's own output total: MiMo's transcript records 0 output tokens on every message (2026-09-27).
+    $outTotal = 0
+    try { $outTotal = [int](($raw | ConvertFrom-Json).usage.output_tokens) } catch { }
+    $spentHere = (Invoke-Native { & $python $spendTool --dir $spendDir record --run-id $runId --transcript $state.transcript --out-total $outTotal `
+        --since $started.ToString('o') --kind $Kind --effort $Effort --project (Split-Path -Leaf $(if ($contribCheckout) { $gitTop } else { $Dir })) `
+        --provider ([string]$prov.provider) --tier ([string]$prov.tier) 2>&1 } | Out-String).Trim()
     if ($LASTEXITCODE -eq 0) { $manifest['cost_usd'] = $spentHere.TrimStart('$') }
 }
 
@@ -1103,7 +1375,7 @@ if (-not $parsed -or -not $parsed.PSObject.Properties['session_id']) {
     if ($raw -and $raw.Trim()) { Write-Output $raw.TrimEnd(); [IO.File]::WriteAllText($manifest.report, $raw, $utf8); $kept = $true }
     else { $kept = Save-PartialReport "the worker crashed (exit code $exitCode$why) before it could report; this is what it had written" }
     Complete-Manifest 'failed' "exit code $exitCode without a readable result$why"
-    Fail "The worker exited with code $exitCode without a readable result$why.$(if ($kept) { " What it had written is in $($manifest.report)." })" ([Math]::Max($exitCode, 1))
+    Fail "The worker exited with code $exitCode without a readable result$why.$(if ($kept) { " What it had written is in $($manifest.report)." })" 1
 }
 
 if ($null -eq $parsed.result -or '' -eq $parsed.result) { $reportText = '(the worker returned no report text)' }
@@ -1146,6 +1418,39 @@ if ($parsed.is_error) {
     $reason = if ($parsed.subtype -and $parsed.subtype -ne 'success') { $parsed.subtype } else { $parsed.terminal_reason }
     $status = if ($reason) { "error($reason)" } else { 'error' }
 }
+# A provider's safety filter can end a run with a one-line refusal that Claude Code reports as success: MiMo
+# stopped a code review after 23 turns with "The request was rejected because it was considered high risk"
+# (review-071-b-mimo.1, 2026-09-27). Record it as refused, not ok.
+if ($status -eq 'ok' -and $reportText -and $reportText.Trim().Length -lt 400 -and
+    $reportText -match '(?i)considered high risk|content (policy|filter)|safety (policy|system)|request was rejected') {
+    $status = 'refused(provider-filter)'
+    Note "$($prov.name)'s content filter refused this run partway: nothing usable came back. Run it on another provider (-Provider deepseek)."
+}
+# --- One automatic resume after an API error: a MiMo coder stopped on "API Error: 400 Request failed" after 30 turns,
+# mid-edit, and carried on fine at the same context when resumed by hand (DOA, 2026-09-29). ds_envelope.py retry
+# decides: not after a first-request failure, a content-filter refusal or a lasting error (a key, a balance). Nor on
+# the retry itself, nor for a training-tier run (it can't be resumed), nor with under 2 minutes or no cost cap left.
+# The resume goes through -Resume in a child launcher, so the run keeps its id, its report gains a section, and each
+# launch records its own spend (each with its own --since). ---
+$retryWhy = $null; $retryMinutes = 0; $retryCap = 0
+if ($parsed.is_error -and -not $ApiRetry -and -not $prov.contributor -and $python -and (Test-Path -LiteralPath $envelopeTool) -and
+    ($reason -eq 'api_error' -or $reportText -match '^API Error') -and $state.transcript) {
+    $resultFile = Join-Path $runDir 'result.tmp'
+    [IO.File]::WriteAllText($resultFile, [string]$raw, $utf8)
+    $retryJson = ((Invoke-Native { & $python -S $envelopeTool retry --result $resultFile --transcript $state.transcript --since $started.ToString('o') 2>$null }) | Out-String).Trim()
+    Remove-Item -LiteralPath $resultFile -ErrorAction SilentlyContinue
+    $decision = $null
+    try { $decision = $retryJson | ConvertFrom-Json } catch { }
+    $retryMinutes = $TimeoutMinutes - [int][Math]::Ceiling(((Get-Date) - $started).TotalMinutes)
+    $spentBefore = 0.0
+    if ($manifest['cost_usd']) { [void][double]::TryParse([string]$manifest['cost_usd'], [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$spentBefore) }
+    $retryCap = [Math]::Round($MaxCost - $spentBefore, 2)
+    if (-not $decision) { }
+    elseif (-not $decision.retry) { Note "the worker stopped on an API error and is not resumed automatically: $($decision.why)" }
+    elseif ($retryMinutes -lt 2) { Note "the worker stopped on an API error with $retryMinutes of its $TimeoutMinutes minutes left, too few to resume it" }
+    elseif ($MaxCost -gt 0 -and $retryCap -lt 0.01) { Note "the worker stopped on an API error with its -MaxCost of `$$MaxCost spent, so it is not resumed" }
+    else { $retryWhy = [string]$decision.why }
+}
 $turns = $parsed.num_turns; $tokensIn = $parsed.usage.input_tokens; $tokensOut = $parsed.usage.output_tokens
 if ($multiTurn) { $turns = $msgIds.Count; $tokensIn = $sumIn; $tokensOut = $sumOut }
 $footer = "[ds-agent] run=$runId session=$($parsed.session_id) status=$status turns=$turns"
@@ -1165,32 +1470,37 @@ if ($noWeb) {
 } elseif ($Kind -eq 'websearch') { $manifest.web_calls = $webCalls }
 if ($resumed -and (Test-Path -LiteralPath $manifest.report)) {
     # A resume adds to the run's report instead of replacing what the earlier launch returned.
-    [IO.File]::AppendAllText($manifest.report, "`n## Resume $resumes`n`n" + $reportText + "`n`n" + $footer + "`n", $utf8)
+    [IO.File]::AppendAllText($manifest.report, "`n## Resume $resumes$(if ($ApiRetry) { ' (automatic, after an API error)' })`n`n" + $reportText + "`n`n" + $footer + "`n", $utf8)
 } else {
     [IO.File]::WriteAllText($manifest.report, "<!-- $runId ($Kind): $Title -->`n" + $reportText + "`n`n" + $footer + "`n", $utf8)
 }
 # Print the report's standard opening and its path, not the whole report: reports run 6-12k characters,
 # and every one Claude reads stays in its context (2.1M characters in 20 hours, OpenSkyrim 2026-09-25).
-$envelope = $null
-if ($envelopeOn -and -not $FullReport) {
-    $reportOnly = Join-Path $runDir 'report-text.tmp'
-    [IO.File]::WriteAllText($reportOnly, $reportText, $utf8)
-    $envJson = ((& $python $envelopeTool head --report $reportOnly --json 2>$null) | Out-String).Trim()
-    Remove-Item -LiteralPath $reportOnly -ErrorAction SilentlyContinue
-    if ($LASTEXITCODE -eq 0 -and $envJson) { try { $envelope = $envJson | ConvertFrom-Json } catch { $envelope = $null } }
-}
-if ($noWeb) { Note 'this websearch worker made no web calls: its sources and links are invented. Discard it or run it again.' }
-if ($envelope) {
-    Write-Output $envelope.head
+function Write-Report {
+    $envelope = $null
+    if ($envelopeOn -and -not $FullReport) {
+        $reportOnly = Join-Path $runDir 'report-text.tmp'
+        [IO.File]::WriteAllText($reportOnly, $reportText, $utf8)
+        $envJson = ((Invoke-Native { & $python $envelopeTool head --report $reportOnly --json 2>$null }) | Out-String).Trim()
+        $envCode = $LASTEXITCODE
+        Remove-Item -LiteralPath $reportOnly -ErrorAction SilentlyContinue
+        if ($envCode -eq 0 -and $envJson) { try { $envelope = $envJson | ConvertFrom-Json } catch { $envelope = $null } }
+    }
+    if ($noWeb) { Note 'this websearch worker made no web calls: its sources and links are invented. Discard it or run it again.' }
+    if ($envelope) {
+        Write-Output $envelope.head
+        Write-Output ''
+        Write-Output "Full report: $($manifest.report) ($($envelope.chars) characters; read it only when you need the details)"
+        foreach ($f in 'status', 'verdict', 'summary', 'left', 'next') { if ($envelope.$f) { $manifest["report_$f"] = [string]$envelope.$f } }
+    } else {
+        Write-Output $reportText
+        if ($envelopeOn -and -not $FullReport) { Note 'this report has no standard opening (Status / Summary / Left / Next); read it in full' }
+    }
     Write-Output ''
-    Write-Output "Full report: $($manifest.report) ($($envelope.chars) characters; read it only when you need the details)"
-    foreach ($f in 'status', 'verdict', 'summary', 'left', 'next') { if ($envelope.$f) { $manifest["report_$f"] = [string]$envelope.$f } }
-} else {
-    Write-Output $reportText
-    if ($envelopeOn -and -not $FullReport) { Note 'this report has no standard opening (Status / Summary / Left / Next); read it in full' }
+    Write-Output $footer
 }
-Write-Output ''
-Write-Output $footer
+# A run about to be resumed after an API error prints nothing of its own: the resume prints the whole run's result.
+if (-not $retryWhy) { Write-Report }
 $manifest.session_id = $parsed.session_id
 $manifest.turns = $turns
 $manifest.tokens_in = $tokensIn
@@ -1223,14 +1533,17 @@ if ($manifest.transcript -and (Test-Path -LiteralPath $subDir)) {
     $manifest.subagent_tokens_in = $subIn
     $manifest.subagent_tokens_out = $subOut
 }
-if ($parsed.is_error) { Complete-Manifest 'failed' $status } else { Complete-Manifest 'completed' $null }
+# A run about to be resumed stays 'working' (a watcher keeps waiting): this event carries its totals to the resume.
+if ($retryWhy) { $manifest.error = $status; Save-Manifest 'api_error' }
+elseif ($parsed.is_error -or $status -like 'refused*') { Complete-Manifest 'failed' $status } else { Complete-Manifest 'completed' $null }
 
 # A map or pitfalls digest (tools/ds_memory.py) is kept as the project's memory as soon as it ends well.
 if (-not $parsed.is_error -and $label -match '^digest-(map|pitfalls)$' -and $python) {
     $memoryTool = @((Join-Path (Split-Path -Parent $PSScriptRoot) 'tools\ds_memory.py'), (Join-Path $PSScriptRoot 'tools\ds_memory.py')) |
         Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
     if ($memoryTool) {
-        $kept = (& $python $memoryTool --project $Dir save $Matches[1] $runId 2>&1 | Out-String).Trim()
+        $memoryWhich = $Matches[1]
+        $kept = (Invoke-Native { & $python $memoryTool --project $Dir save $memoryWhich $runId 2>&1 } | Out-String).Trim()
         Note $kept
     }
 }
@@ -1242,7 +1555,7 @@ if (-not $parsed.is_error -and $python -and ($label -match '^audit-(.+)$' -or $l
         Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
     if ($auditTool) {
         $saveArgs = if ($auditArea) { @('save', 'audit', $auditArea, $runId) } else { @('save', 'checklists', $runId) }
-        Note ((& $python $auditTool --project $Dir @saveArgs 2>&1 | Out-String).Trim())
+        Note ((Invoke-Native { & $python $auditTool --project $Dir @saveArgs 2>&1 } | Out-String).Trim())
     }
 }
 
@@ -1258,5 +1571,51 @@ try {
     [IO.File]::AppendAllText($runLog, $row + "`r`n", $utf8)
 } catch { Note "could not write the run log: $($_.Exception.Message)" }
 
-if ($parsed.is_error) { exit ([Math]::Max($exitCode, 1)) }
-exit $exitCode
+# A contributor-tier run's clean checkout is only for this run: remove it (runs that end early are swept at the
+# next contributor launch, after 12 hours).
+if ($contribCheckout -and (Test-Path -LiteralPath $contribCheckout)) {
+    Invoke-Native { & git -C $gitTop worktree remove --force $contribCheckout 2>&1 } | Out-Null
+}
+
+# --- The automatic resume (decided above, after the report): this same script with -Resume and -ApiRetry, the run's
+# own settings, and what is left of its timeout and cost cap. Its output is the run's result. ---
+if ($retryWhy) {
+    $errLine = ($reportText -split "`r?`n" | Where-Object { $_.Trim() } | Select-Object -First 1) -replace '["`]', ''
+    if ($errLine.Length -gt 200) { $errLine = $errLine.Substring(0, 200) }
+    Note "the worker stopped on an API error ($errLine), and $retryWhy`: resuming it once, automatically"
+    $retryNote = "Your last step stopped on an API error from the model provider ($errLine), not because of anything you did. Before carrying on, check the state of the files you were changing: a change may be half made. Then finish the task your brief asks for and write your report as it says."
+    $childArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath, '-Resume', [string]$parsed.session_id, '-Dir', $Dir,
+        '-Task', $retryNote, '-ApiRetry', '-Label', $label, '-Kind', $Kind, '-Provider', [string]$prov.provider, '-TimeoutMinutes', [string]$retryMinutes)
+    if ($MaxCost -gt 0) { $childArgs += @('-MaxCost', [string]$retryCap) }
+    foreach ($name in @($PSBoundParameters.Keys)) {
+        # The title and parent come back from the manifest, like any resume's.
+        if ($name -in @('Task', 'TaskFile', 'Extra', 'Resume', 'Dir', 'Label', 'Kind', 'Provider', 'TimeoutMinutes', 'MaxCost', 'DryRun', 'ApiRetry', 'Title', 'Parent')) { continue }
+        $value = $PSBoundParameters[$name]
+        if ($value -is [System.Management.Automation.SwitchParameter]) { if ($value.IsPresent) { $childArgs += "-$name" } }
+        elseif ([string]$value -ne '') { $childArgs += @("-$name", [string]$value) }   # an empty argument would be dropped
+    }
+    $hostExe = (Get-Process -Id $PID).Path
+    # Its report lines pass through as this launcher's output, its notes to stderr (Invoke-Native would merge them).
+    $nativeEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & $hostExe @childArgs 2>&1 | ForEach-Object {
+            if ($_ -is [System.Management.Automation.ErrorRecord]) { [Console]::Error.WriteLine($_.ToString()) } else { $_ }
+        }
+    } finally { $ErrorActionPreference = $nativeEap }
+    $childCode = $LASTEXITCODE
+    # A resume that never started its worker (held by the budget, a setup failure) left this launch's event last.
+    $after = $null
+    try { $after = [IO.File]::ReadAllText((Join-Path $runDir 'manifest.json'), $utf8) | ConvertFrom-Json } catch { }
+    if ($after -and $after.state -eq 'working' -and $after.pid -eq $manifest.pid) {
+        Write-Report
+        Complete-Manifest 'failed' "$status; the automatic resume did not start (exit code $childCode)"
+        exit 1
+    }
+    exit $childCode
+}
+
+# 1 for any failed worker, whatever its own code (kept in the manifest as worker_exit_code): 2, 3 and 4 are the
+# launcher's own (see the exit codes at the top).
+if ($parsed.is_error -or $status -like 'refused*' -or $exitCode -ne 0) { exit 1 }
+exit 0

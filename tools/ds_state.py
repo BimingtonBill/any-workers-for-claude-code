@@ -15,17 +15,45 @@ import subprocess
 from pathlib import Path
 
 
-def _script():
-    """launcher/ds-state.ps1, found the way the tools find ds-agent.ps1: in the harness it is beside the
-    launcher, <harness>/launcher/; installed as part of the skill the launcher's files sit beside tools/;
-    anywhere else the tools were copied into a project's tools/ and the launcher is the installed
-    skill's."""
+def project_root(tools_dir=None):
+    """The project a tool acts on; tools_dir is the folder the tool sits in (default: this file's). Run from the
+    DeepSeek Workers harness or the installed skill, that is DS_PROJECT or the current folder. Copied into a
+    project's tools/, it is DS_PROJECT or the folder above tools/, wherever it is run from."""
+    if os.environ.get('DS_PROJECT'):
+        return Path(os.environ['DS_PROJECT']).resolve()
+    here = Path(tools_dir or Path(__file__).resolve().parent).resolve().parent
+    # The harness (launcher/ds-agent.ps1) or the installed skill (ds-agent.ps1 beside tools/): act on
+    # the folder it is run from. Anywhere else, the tools sit in a project's tools/: act on that project.
+    if (here / 'launcher' / 'ds-agent.ps1').exists() or (here / 'ds-agent.ps1').exists():
+        return Path(os.getcwd()).resolve()
+    return here
+
+
+def launcher_dir(name='ds-state.ps1'):
+    """The folder holding the launcher's file `name`: <harness>/launcher/ in the harness; the skill folder once
+    installed (the launcher's files sit beside tools/); anywhere else the tools were copied into a project's
+    tools/ and the launcher is the installed skill's. None when not found."""
     root = Path(__file__).resolve().parents[1]
-    for candidate in (root / 'launcher' / 'ds-state.ps1', root / 'ds-state.ps1',
-                      Path.home() / '.claude' / 'skills' / 'deepseek-agents' / 'ds-state.ps1'):
-        if candidate.is_file():
-            return candidate
+    for folder in (root / 'launcher', root, Path.home() / '.claude' / 'skills' / 'deepseek-agents'):
+        if (folder / name).is_file():
+            return folder
     return None
+
+
+def use_launcher(name='ds_common.py'):
+    """Put the launcher folder holding `name` on sys.path, so a tool can import the launcher's Python modules
+    (ds_common, ds_spend) in the harness and installed. Returns the folder, or None."""
+    import sys
+    folder = launcher_dir(name)
+    if folder is not None and str(folder) not in sys.path:
+        sys.path.append(str(folder))
+    return folder
+
+
+def _script():
+    """launcher/ds-state.ps1, found the way the tools find ds-agent.ps1 (launcher_dir)."""
+    folder = launcher_dir('ds-state.ps1')
+    return folder / 'ds-state.ps1' if folder is not None else None
 
 
 def state_dir(project=None):
@@ -55,7 +83,7 @@ def fallback_dir(project=None, env=None):
         # The script makes it absolute with GetFullPath (audit finding SDR-20260924-05).
         return Path(os.path.abspath(env['DS_STATE_DIR']))
     try:
-        configured = json.loads((project / '.deepseek-agents.json').read_text(encoding='utf-8')).get('stateDir')
+        configured = json.loads((project / '.deepseek-agents.json').read_text(encoding='utf-8-sig')).get('stateDir')
     except (OSError, ValueError, AttributeError):
         configured = None
     if configured:

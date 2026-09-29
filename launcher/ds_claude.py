@@ -22,10 +22,13 @@ Levels, from how far usage runs ahead of an even pace through each window (the s
 import argparse
 import datetime as dt
 import json
-import os
 import re
 import sys
 from pathlib import Path
+
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+import ds_common  # noqa: E402  (beside this file, in the harness and once installed)
 
 LENGTH = {'five_hour': dt.timedelta(hours=5), 'week': dt.timedelta(days=7)}
 HEAD_START = {'five_hour': 0.25, 'week': 0.1}   # a 5-hour window is bursty; a week should run even
@@ -47,13 +50,10 @@ DO = {
 }
 
 
-def spend_dir():
-    return Path(os.environ.get('DS_SPEND_DIR') or Path.home() / '.claude-deepseek' / 'spend')
-
-
-def parse_time(text):
-    t = dt.datetime.fromisoformat(str(text).replace('Z', '+00:00'))
-    return t if t.tzinfo else t.astimezone()
+# One copy of each, in ds_common.py beside this file. parse_time gives UTC: every caller here compares, subtracts or
+# prints through astimezone(), so the zone it carries does not matter.
+spend_dir = ds_common.spend_dir
+parse_time = ds_common.parse_time
 
 
 def key(label):
@@ -97,7 +97,7 @@ def record(d, windows, now=None):
             w['start'] = row['at']
         elif old.get('start'):
             w['start'] = old['start']
-    with open(d / 'claude.jsonl', 'a', encoding='utf-8') as fh:
+    with open(d / 'claude.jsonl', 'a', encoding='utf-8', newline='\n') as fh:
         fh.write(json.dumps(row) + '\n')
     return row
 

@@ -24,8 +24,8 @@ $customTarget = [bool]$Target
 $skills = if ($Target) { $Target } else { Join-Path $HOME '.claude\skills' }
 $target = Join-Path $skills 'deepseek-agents'
 
-$files = [ordered]@{ 'SKILL.md' = 'skill\deepseek-agents\SKILL.md'; 'ds_hook.py' = 'skill\deepseek-agents\ds_hook.py' }
-foreach ($name in 'ds-agent.ps1', 'ds-spawn.ps1', 'ds_mcp.py', 'ds-which.ps1', 'ds-watch.ps1', 'ds-state.ps1', 'ds_spend.py', 'ds_steer.py', 'ds_claude.py', 'ds_envelope.py') {
+$files = [ordered]@{ 'SKILL.md' = 'skill\deepseek-agents\SKILL.md'; 'ds_hook.py' = 'skill\deepseek-agents\ds_hook.py'; 'ds_hook_main.py' = 'skill\deepseek-agents\ds_hook_main.py' }
+foreach ($name in 'ds-agent.ps1', 'ds-spawn.ps1', 'ds_mcp.py', 'ds-which.ps1', 'ds-watch.ps1', 'ds-state.ps1', 'ds_common.py', 'ds_spend.py', 'ds_steer.py', 'ds_claude.py', 'ds_envelope.py', 'ds_providers.py', 'ds_allowance.py', 'ds_prepare.py', 'providers.json') {
     $files[$name] = "launcher\$name"
 }
 foreach ($tool in Get-ChildItem (Join-Path $root 'tools') -File | Where-Object { $_.Extension -in '.py', '.ps1' -and $_.Name -notin 'install-skill.ps1', 'build-kit.py' }) {

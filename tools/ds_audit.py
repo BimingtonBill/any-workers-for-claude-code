@@ -59,8 +59,7 @@ def audits_meta(project):
 
 
 def save_audits_meta(project, m):
-    mem(project).mkdir(parents=True, exist_ok=True)
-    (mem(project) / 'audits.json').write_text(json.dumps(m, indent=1), encoding='utf-8')
+    ds_memory.write_json_atomic(mem(project) / 'audits.json', m)
 
 
 # --- Checklists ---
@@ -144,7 +143,8 @@ def write_ledger(project, rows):
             if line.strip():
                 kept.append(line)
     tmp = f.with_name('findings.%d.tmp' % os.getpid())
-    tmp.write_text(''.join(json.dumps(r) + '\n' for r in rows) + ''.join(x + '\n' for x in kept), encoding='utf-8')
+    with open(tmp, 'w', encoding='utf-8', newline='\n') as fh:     # LF, like every .jsonl the harness writes
+        fh.write(''.join(json.dumps(r) + '\n' for r in rows) + ''.join(x + '\n' for x in kept))
     tmp.replace(f)
 
 

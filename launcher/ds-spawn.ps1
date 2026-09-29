@@ -11,6 +11,9 @@
   Children are read-only unless -Mode edit is passed, and a lead that is itself read-only cannot
   give its children edit rights (DS_PARENT_MODE).
 
+  Exit code: 0 when every worker ended ok; 3 when every one timed out and 4 when every one was held by the
+  budget or pace (ds-agent.ps1's own codes, passed on); 1 when any other worker failed; 2 for bad arguments.
+
 .EXAMPLE
   powershell -NoProfile -ExecutionPolicy Bypass -File ds-spawn.ps1 -Dir C:\code\app -Briefs a.md,b.md
 #>
@@ -57,16 +60,26 @@ foreach ($b in $Briefs) {
     if ($NoCrosstalk) { $argList += '-NoCrosstalk' } elseif ($Crosstalk) { $argList += '-Crosstalk' }
     $p = Start-Process -FilePath 'powershell.exe' -ArgumentList $argList -NoNewWindow -PassThru `
         -RedirectStandardOutput $out -RedirectStandardError $err
-    $jobs += [pscustomobject]@{ Label = $label; Proc = $p; Out = $out; Err = $err }
-    # Stagger starts so two children never read the manifest counter at the same instant.
-    Start-Sleep -Milliseconds 800
+    # Hold the process handle now: without it, a Start-Process child's ExitCode can read as nothing once it ends.
+    $null = $p.Handle
+    $jobs += [pscustomobject]@{ Label = $label; Proc = $p; Out = $out; Err = $err; Killed = $false }
+    # A short stagger between starts, none after the last. It was 800 ms so two children would not read the
+    # manifest's attempt counter at once, but that counter is per label (each brief's file name), it counts
+    # start events written well over 800 ms after launch anyway, and ds_spend.py's pace lock already
+    # serialises the spend claims. At 800 ms after every child, four readers waited 3.2 s.
+    if ($jobs.Count -lt $Briefs.Count) { Start-Sleep -Milliseconds 200 }
 }
 Write-Output "[ds-spawn] started $($jobs.Count) worker(s) under $(if ($env:DS_RUN_ID) { $env:DS_RUN_ID } else { 'Claude' }): $($jobs.Label -join ', ')"
 
 $deadline = (Get-Date).AddMinutes($TimeoutMinutes + 2)
 foreach ($j in $jobs) {
     $left = [int][Math]::Max(1000, ($deadline - (Get-Date)).TotalMilliseconds)
-    if (-not $j.Proc.WaitForExit($left)) { & taskkill.exe /PID $j.Proc.Id /T /F 2>$null | Out-Null }
+    if (-not $j.Proc.WaitForExit($left)) {
+        # taskkill's "not found" on stderr would be a terminating error under 'Stop' in Windows PowerShell 5.1.
+        $ErrorActionPreference = 'Continue'
+        try { & taskkill.exe /PID $j.Proc.Id /T /F 2>$null | Out-Null } finally { $ErrorActionPreference = 'Stop' }
+        $j.Killed = $true
+    }
 }
 
 # Where the launcher keeps run records, by the launcher's own rule (launcher/ds-state.ps1, beside this
@@ -75,7 +88,10 @@ foreach ($j in $jobs) {
 $stateDir = & (Join-Path $PSScriptRoot 'ds-state.ps1') -Dir $Dir
 
 $failed = 0
+$codes = @()
 foreach ($j in $jobs) {
+    # A child stopped here for running past the deadline counts as timed out (3), like one its launcher stopped.
+    $codes += $(if ($j.Killed) { 3 } elseif ($null -ne $j.Proc.ExitCode) { [int]$j.Proc.ExitCode } else { 1 })
     $text = [IO.File]::ReadAllText($j.Out, $utf8).TrimEnd()
     $errText = ([IO.File]::ReadAllText($j.Err, $utf8) -split "`r?`n" | Where-Object { $_ -match '^\[ds-agent\]' }) -join "`n"
     $footer = ($text -split "`r?`n" | Where-Object { $_ -match '^\[ds-agent\] run=' } | Select-Object -Last 1)
@@ -106,4 +122,9 @@ foreach ($j in $jobs) {
 }
 Write-Output ''
 Write-Output "[ds-spawn] done: $($jobs.Count - $failed) ok, $failed failed"
-if ($failed) { exit 1 }
+if ($failed) {
+    # ds-agent.ps1's own 3 (timed out) and 4 (held by the budget or pace) are passed on when every worker got it,
+    # so a lead or ds_mcp.py can tell "all held" from "something went wrong".
+    foreach ($c in 3, 4) { if (@($codes | Where-Object { $_ -ne $c }).Count -eq 0) { exit $c } }
+    exit 1
+}
