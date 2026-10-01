@@ -76,6 +76,19 @@ def _due_marker(session_id):
     return os.path.join(_spend_dir(), 'claude-due', safe)
 
 
+LONG_RAW = 700     # a raw hook event holds about 400 characters besides the command: a command over ~300
+
+
+def needs_description(raw):
+    """True when a shell call may show up in the Background tasks panel under its whole command: it has no
+    description and is backgrounded, multi-line or long (the panel titles an entry with its description, else the
+    command itself: a pasted python heredoc filled a screenful, 2026-09-30). Decided from the raw text; the full
+    path in ds_hook_main.undescribed makes the final call."""
+    if '"description"' in raw:
+        return False
+    return 'run_in_background' in raw or '\\n' in raw or len(raw) > LONG_RAW
+
+
 def quiet(raw):
     """True when this event certainly needs nothing from the hook, decided from the raw event text alone: a
     shell call that can't be a worker launch (the command never names ds-agent.ps1 or ds_impl.ps1), after
@@ -93,7 +106,7 @@ def quiet(raw):
     if any(s in plain for s in SCRIPTS):
         return False
     if event == 'PreToolUse':
-        return True
+        return not needs_description(raw)
     if _field(raw, 'agent_id'):     # a subagent's shell call: the notes are for the session that leads
         return True
     sid = _field(raw, 'session_id')

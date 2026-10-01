@@ -551,6 +551,19 @@ $denyRules = @($denyRules | Select-Object -Unique)
 # in this process.
 $stateDir = & (Join-Path $PSScriptRoot 'ds-state.ps1') -Dir $Dir
 $manifestLog = Join-Path $stateDir 'manifest.jsonl'
+# A lead reads its workers' full reports: spawn_workers hands back only summaries and the report paths, and those sit in
+# this state folder's runs\. Inside the lead's own -Dir it can read them anyway; when the state folder is somewhere else
+# (a worktree launched with -Dir while the project's stateDir points elsewhere) the reads were denied and the lead
+# re-did the work from the diff (2026-10-01). So that folder is added read-only.
+if ($CanSpawn -and -not $prov.contributor) {
+    $runsRoot = Join-Path $stateDir 'runs'
+    if (-not $DryRun) { New-Item -ItemType Directory -Force -Path $runsRoot | Out-Null }
+    $fullRuns = [IO.Path]::GetFullPath($runsRoot); $fullLeadDir = [IO.Path]::GetFullPath($Dir).TrimEnd('\') + '\'
+    if (-not $fullRuns.StartsWith($fullLeadDir, [StringComparison]::OrdinalIgnoreCase) -and ($DryRun -or (Test-Path -LiteralPath $runsRoot)) -and $readOnlyDirs -notcontains $fullRuns) {
+        $readOnlyDirs += $fullRuns
+        $denyRules += "Edit($(ConvertTo-RulePath $fullRuns)/**)"
+    }
+}
 # Run records inside a git project that doesn't ignore them would show up as untracked files: keep them out
 # through the clone's own .git/info/exclude, which changes no tracked file (any project, 2026-09-26).
 if (-not $DryRun) {
@@ -981,6 +994,9 @@ if ($Bare) { $cliArgs = @($cliArgs[0], '--bare') + $cliArgs[1..($cliArgs.Count -
 $cliArgs += '--name', $runId
 if ($readOnlyDirs) { $cliArgs += '--add-dir'; $cliArgs += $readOnlyDirs }
 if ($mcpConfigFile) { $cliArgs += '--mcp-config', $mcpConfigFile }
+# A provider marked debugLog keeps Claude Code's API debug log in the run folder: its "malformed response" error
+# hides the body the gateway sent back, and only this log can show it (Sol through OpenRouter, 2026-09-30).
+if ($prov.debugLog) { $cliArgs += '--debug', 'api', '--debug-file', (Join-Path $runDir 'debug.log') }
 if ($Schema) {
     if (-not (Test-Path -LiteralPath $Schema -PathType Leaf)) { Fail "Schema file not found: $Schema" }
     $cliArgs += '--json-schema', ([IO.File]::ReadAllText((Resolve-Path -LiteralPath $Schema).ProviderPath, $utf8))
@@ -1329,7 +1345,15 @@ if ($spendOn -and $state.transcript -and (Test-Path -LiteralPath $state.transcri
     $spentHere = (Invoke-Native { & $python $spendTool --dir $spendDir record --run-id $runId --transcript $state.transcript --out-total $outTotal `
         --since $started.ToString('o') --kind $Kind --effort $Effort --project (Split-Path -Leaf $(if ($contribCheckout) { $gitTop } else { $Dir })) `
         --provider ([string]$prov.provider) --tier ([string]$prov.tier) 2>&1 } | Out-String).Trim()
-    if ($LASTEXITCODE -eq 0) { $manifest['cost_usd'] = $spentHere.TrimStart('$') }
+    if ($LASTEXITCODE -eq 0) {
+        # A resume records only its own steps, so add the run's earlier cost (a resumed run showed $0.000 after
+        # spending $0.25, 2026-09-30). The ledger rows were always right; this is the manifest's figure.
+        $earlier = 0.0
+        if ($resumed -and $resumed.cost_usd) { [void][double]::TryParse([string]$resumed.cost_usd, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$earlier) }
+        $here = 0.0
+        [void][double]::TryParse($spentHere.TrimStart('$'), [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$here)
+        $manifest['cost_usd'] = ($earlier + $here).ToString('0.000', [Globalization.CultureInfo]::InvariantCulture)
+    }
 }
 
 # A worker that is killed or crashes never prints its result (a -p run writes stdout only at the end), so
@@ -1433,6 +1457,20 @@ if ($status -eq 'ok' -and $reportText -and $reportText.Trim().Length -lt 400 -an
 # The resume goes through -Resume in a child launcher, so the run keeps its id, its report gains a section, and each
 # launch records its own spend (each with its own --since). ---
 $retryWhy = $null; $retryMinutes = 0; $retryCap = 0
+# Claude Code turns a gateway's error object into "empty or malformed response" and hides it. The API debug log a
+# provider keeps (debugLog) still holds it: OpenRouter's "rate-limited upstream" hit a Sol review that way (2026-10-01).
+$gatewayError = $null
+if ($parsed.is_error -and $prov.debugLog -and $reportText -match 'malformed response') {
+    $debugFile = Join-Path $runDir 'debug.log'
+    if (Test-Path -LiteralPath $debugFile) {
+        try {
+            $tail = [IO.File]::ReadAllText($debugFile, $utf8)
+            if ($tail.Length -gt 200000) { $tail = $tail.Substring($tail.Length - 200000) }
+            $found = [regex]::Matches($tail, '"type":"error","error":\{"type":"(\w+)","message":"([^"]+)"')
+            if ($found.Count) { $gatewayError = $found[$found.Count - 1].Groups[2].Value; $reportText += "`n`nThe gateway's own message, from this run's debug.log: $gatewayError`n" }
+        } catch { }
+    }
+}
 if ($parsed.is_error -and -not $ApiRetry -and -not $prov.contributor -and $python -and (Test-Path -LiteralPath $envelopeTool) -and
     ($reason -eq 'api_error' -or $reportText -match '^API Error') -and $state.transcript) {
     $resultFile = Join-Path $runDir 'result.tmp'
@@ -1582,6 +1620,11 @@ if ($contribCheckout -and (Test-Path -LiteralPath $contribCheckout)) {
 if ($retryWhy) {
     $errLine = ($reportText -split "`r?`n" | Where-Object { $_.Trim() } | Select-Object -First 1) -replace '["`]', ''
     if ($errLine.Length -gt 200) { $errLine = $errLine.Substring(0, 200) }
+    if ($gatewayError) {
+        # A rate limit passes with a wait; resuming at once meets the same limit (two resumes failed again within seconds).
+        Note "the gateway said: $gatewayError. Waiting 60 seconds before the resume."
+        Start-Sleep -Seconds 60
+    }
     Note "the worker stopped on an API error ($errLine), and $retryWhy`: resuming it once, automatically"
     $retryNote = "Your last step stopped on an API error from the model provider ($errLine), not because of anything you did. Before carrying on, check the state of the files you were changing: a change may be half made. Then finish the task your brief asks for and write your report as it says."
     $childArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath, '-Resume', [string]$parsed.session_id, '-Dir', $Dir,

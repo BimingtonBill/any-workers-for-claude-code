@@ -775,8 +775,8 @@ def plan(d, kind, balance=None, now=None, lineage='', waited=False, provider='de
                 if p['fits_at'] else 'it fits again after the reset at %s' % resets(p['period'], now, d))
         out.update(ok=False, lines=['%s, so %s wait (%s). %s' % (
             ahead, 'all new workers' if ease >= 4 else '%s workers' % kind, when, both if claude_level(d, now) >= 2 else
-            'Run it as a Claude subagent on Sonnet 5.5 instead (Opus only if Sonnet has already failed at it, or the user asks), or wait.' if ease >= 4 else
-            'Run it as a Claude subagent on Sonnet 5.5 instead (Opus only if Sonnet has already failed at it, or the user asks), split off the parts a research or review worker can do, or wait.')])
+            'Run it as a Claude subagent on Sonnet 5.5 instead (Opus if the work needs judgment), or wait.' if ease >= 4 else
+            'Run it as a Claude subagent on Sonnet 5.5 instead (Opus if the work needs judgment), split off the parts a research or review worker can do, or wait.')])
         return out
     out['effort_cap'] = 'high' if ease == 1 else 'low'
     mine = set(filter(None, lineage.split('/')))

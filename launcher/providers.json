@@ -63,6 +63,30 @@
       },
       "unverified": "Contributor is its own model name on the same key (dev.meta.ai/models/muse-spark, 2026-09-27); the max reasoning level is Standard-only. Effort support, rate limits, speed and availability in Australia: check with a key."
     },
+    "sol": {
+      "name": "OpenAI GPT-6.1 Sol (via OpenRouter)",
+      "short": "Sol",
+      "baseUrl": "https://openrouter.ai/api",
+      "auth": "auth_token",
+      "keyEnv": "OPENROUTER_API_KEY",
+      "model": "openai/gpt-6.1-sol",
+      "smallModel": "openai/gpt-6.1-sol",
+      "efforts": null,
+      "maxOutputTokens": 128000,
+      "debugLog": true,
+      "env": {
+        "ENABLE_TOOL_SEARCH": "false",
+        "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "250000"
+      },
+      "keyPage": "openrouter.ai/keys",
+      "prices": {
+        "cache_read": 0.1,
+        "fresh_in": 2.0,
+        "cache_write": 2.5,
+        "out": 10.0
+      },
+      "unverified": "GPT-6.1 Sol (released 2026-09-29; model id gpt-6.1-sol, $2 / $10 per million, $0.10 cached, 1.05M context, prompts over 272K tokens cost 2x input and 1.5x output) through OpenRouter's Anthropic-format endpoint. OpenRouter says Claude Code is optimised for Anthropic models and other providers may not work correctly: tool calls, thinking, prompt caching and the effort setting are unproven here. OpenRouter charges a fee when credits are bought, which the recorded spend does not include. No balance check: OpenRouter has a credits endpoint that is not wired in."
+    },
     "xiaomi": {
       "name": "Xiaomi MiMo",
       "short": "MiMo",

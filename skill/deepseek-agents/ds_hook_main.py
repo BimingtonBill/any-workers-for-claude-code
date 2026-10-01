@@ -88,14 +88,10 @@ def next_number(transcript, sd):
 
 
 def coding_model(kind, asked):
-    """Sonnet for a Claude subagent that names no model, coders included. The user's call, 2026-09-29: Claude
-    Sonnet 5.5 (Intelligence Index 56 against Opus 5.5's 58 and DeepSeek V4.1 Flash's 40; Terminal-Bench 4.0
-    64% against Opus's 60%) takes over Claude's reading, review and design helpers and coding. It replaced
-    Opus for coders, which had been set on 2026-09-25 after impl #185 on Sonnet 5 spent 48 minutes and 172
-    turns on a renderer bug. A caller that names a model keeps it. The user's rule (2026-09-29, from the Project B session, where a hard reverse-engineering job
-    had been sent to Opus): Sonnet 5.5 unless Sonnet has already failed at the task; Opus only after that, or when the
-    user asks. None
-    means leave the model alone."""
+    """Sonnet for a Claude subagent that names no model, coders included. The user's rule (2026-09-29): Sonnet 5.5
+    for well-scoped work with a clear check, Opus 5.5 for work that needs judgment, which the calling session
+    names (SKILL.md has the reasoning: at the same effort Opus is far stronger at medium, and the gap narrows
+    at high). A caller that names a model keeps it. None means leave the model alone."""
     if asked:
         return None
     return 'sonnet'
@@ -572,6 +568,17 @@ def timeout_refusal(seconds):
             'Other wrappers (nohup, env, nice) are fine.' % minutes)
 
 
+LONG_COMMAND = 300   # characters; a longer shell command with no description is asked for one
+
+
+def undescribed(tool_input, cmd):
+    """A backgrounded, multi-line or long shell command with no description: the Background tasks panel would
+    title it with the whole command."""
+    if str(tool_input.get('description') or '').strip():
+        return False
+    return bool(tool_input.get('run_in_background')) or '\n' in cmd.strip() or len(cmd) > LONG_COMMAND
+
+
 def held(cmd, provider, kind, cwd):
     """Why a worker launch would be held by its provider's pace, limits or plan allowance, or None. The user,
     2026-09-29: held work should still happen, as a Claude subagent on Sonnet 5.5. A resume stays with its
@@ -608,7 +615,7 @@ def claude_instead(cmd, who, why, named):
               else 'the -Task text' if task else 'the same brief')
     edits = named.group(2) == 'impl' or re.search(r'-Mode\s+edit\b', cmd, re.I) or 'ds_impl' in cmd.lower()
     text = ('%s is held right now: %s Do the same work as a Claude subagent instead: the Agent tool with '
-            'description "Claude %s #%s: %s", model "sonnet" (Sonnet 5.5; "opus" only if Sonnet has already failed at this task, or the user asks), '
+            'description "Claude %s #%s: %s", model "sonnet" (Sonnet 5.5 for well-scoped work; "opus" for work that needs judgment: hard debugging, design, security, ambiguous briefs), '
             'the prompt from %s%s, and run_in_background true.' % (
                 who, why.strip(), named.group(2), named.group(3), named.group(4), source,
                 ', isolation "worktree", since it edits files' if edits else ''))
@@ -727,6 +734,14 @@ def main(raw=None):
     tool_input = event.get('tool_input') or {}
     cmd = str(tool_input.get('command') or tool_input.get('script') or '')
     if not launches_worker(cmd):
+        if hook == 'PreToolUse' and undescribed(tool_input, cmd):
+            print(json.dumps({'hookSpecificOutput': {
+                'hookEventName': 'PreToolUse', 'permissionDecision': 'deny',
+                'permissionDecisionReason': (
+                    'This shell command has no description, and the Background tasks panel would show the whole '
+                    'command as its title. Run the same command again with a short description (under about 60 '
+                    'characters, e.g. "Run converter tests" or "Patch pipeline.rs").')}}))
+            return
         if hook == 'PostToolUse':
             post_note(event)
         return

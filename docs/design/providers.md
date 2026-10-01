@@ -241,3 +241,74 @@ Probe (`experiments/briefs/probe-074-provider-limits.md`): a copy of the spend f
 at $0.50 against $7.30 spent. Dry runs: DeepSeek "a real launch would be refused: DeepSeek spend limit reached";
 MiMo and Muse "within limits". A real MiMo run (probe-074-provider-limits.1) then started, answered in 15 s and
 was recorded with `"provider": "xiaomi"`. Tests: 7 new in tests/test_ds_spend.py; 437 pass.
+
+## Model strengths and weaknesses (2026-09-30)
+
+Four websearch workers (`websearch-100` to `-103`, DeepSeek, about 13 to 17 turns each) profiled each model; full
+reports are in `local/agents/runs/websearch-10{0-3}-*-profile.1/report.md`. Numbers are vendor-reported unless
+marked independent; several forum claims were seen only as search snippets.
+
+| | DeepSeek V4.1 Flash | MiMo V2.6 Pro | Muse Spark 1.3 | GPT-6.1 Sol |
+|---|---|---|---|---|
+| Strong | Independent DeepSWE 74.3% at $0.43 a task (Opus 5: 73.7% at $11.84); very cheap cache; 1M context | Top open-weights model on Artificial Analysis (46, about $0.13 a task); a 23/23 hands-on tie with Opus 5 at about 1/30 the cost; 99% cache discount | Independent index 61 at $0.55 a task; strong terminal and tool-use gains; 1M context | DeepSWE 75.2% at high effort, about $0.65 a task; very low verbosity; cheap cache |
+| Weak | HLE without tools 34.5% (independent) against 50.4%; lead gone on Terminal-Bench 3/4, NL2Repo, ProgramBench; about 4x the output tokens; weak reviewer (85 in one run); unverified reports of loops past half of a 1M context | Slow (41 tokens/s against a 71 median, 4.2 s to first token); shipped with a tool-call repetition bug, fixed 25 Sep; Terminal-Bench 4.0 34.9 against 49.0 | The top "max" tier is not developer-available; verbose (about 57% more input tokens a task); one hacking test ran 5 h 14 min and $43 for no verified win; thin independent safety data | `max` effort is worse than `high` for coding at 2.4x the cost; trails Astra and Opus 5.5 on science and automation; 59 tokens/s; 2x input and 1.5x output above 272K tokens; almost all numbers are OpenAI's own |
+| Fit for a worker | Test-verifiable coding, bulk research, cached long reading | Same, where its speed does not matter | Cheap bounded work: research, analysis, second reviews | Coding lane at high effort; unproven here beyond one probe |
+| Poor fit | Hard reasoning without tools, long autonomous planning, sole reviewer | Time-sensitive runs, frameworks that strip `reasoning_content` (HTTP 400) | Long-horizon persistence, sole reviewer | Very long prompts, the hardest research |
+
+DeepSeek's Anthropic-format endpoint maps `claude-opus*` names to v4-pro and bills them at Pro rates, and unknown
+names to Flash. The launcher sets every model variable to `deepseek-flash`, so a worker never sends a `claude-*`
+name; a hand-set `ANTHROPIC_DEFAULT_*_MODEL` would change that. "V4.1 Pro" is early access only, with no model card
+or price.
+
+What changed because of it:
+
+- Sol's `CLAUDE_CODE_AUTO_COMPACT_WINDOW` is 250000 (providers.json `env`), so a worker compacts before the 272K-token
+  price step. Checked with a dry run (the variable is in the worker's environment) and a registry test; whether Claude
+  Code compacts at that point on Sol is not yet proven by a long run.
+- The skill has a short model-fit paragraph so a lead routes by these strengths (below the reviewer rule: DeepSeek,
+  Muse and Sol are second reviewers, never the only one).
+- Open: try Sol at `high` and `max` effort through OpenRouter. The launcher sends no effort setting for Sol
+  (`efforts` is null) and it is unknown whether OpenRouter forwards it. Needs a probe before it goes in.
+
+## Sol: recording checked against OpenRouter (2026-09-30)
+
+- **Tokens.** A 47-turn Sol run showed `tokens_in=36`. That figure is only the fresh input, as with DeepSeek; cached and
+  cache-write tokens are separate ledger fields.
+- **Money.** The ledger was checked against OpenRouter's own per-key usage (`GET /api/v1/key`, the key the workers
+  use). It was about 11% low, and the gap was exactly the cache-write tokens at $0.50 per million: OpenAI's page
+  prices cache writes at $2.50, not the $2.00 the entry had. With `cache_write` 2.5 the ledger matched OpenRouter's
+  figure to four decimal places.
+- **Manifest cost.** A resumed run's `cost_usd` showed only the resume's spend; it now adds the earlier attempts. The
+  ledger rows were right all along.
+
+## Sol failures seen in use (2026-10-01)
+
+- **"Empty or malformed response" was OpenRouter's upstream rate limit.** Sol runs keep an API debug log
+  (`--debug api --debug-file <run>/debug.log`, providers.json `debugLog`), and it caught the real message:
+  `openai/gpt-6.1-sol is temporarily rate-limited upstream. Please retry shortly, or add your own key to accumulate
+  your rate limits`. It is an error object sent mid-stream; Claude Code then retries without streaming, gets the same
+  object back with HTTP 200 and reports it as "empty or malformed". That is why an immediate resume failed again. The
+  launcher now reads the gateway's own message from `debug.log`, adds it to the report, and waits 60 seconds before the
+  automatic resume. A key of your own at the upstream provider (OpenRouter's integrations page) would lift the shared
+  limit; not done.
+- **A resume held by the pace.** The automatic resume is a new launch, so the provider's pace holds it like any other.
+  Left as it is: pacing only, no exemptions.
+- **"git: command not found" in workers (intermittent, not provider-specific).** The worker's bash saw a Windows-format
+  `PATH` (semicolons, `C:\...`), which bash cannot split, so even `ls` was missing. Seen twice with Sol and once with a
+  DeepSeek coder. A DeepSeek probe launched from a Bash tool through powershell.exe, the same route as the failing
+  launches, ran `git` and `ls` fine, and other Sol sessions ran Bash fine, so it is not reproduced and the cause is not
+  found. If it recurs, make the worker's first call `echo "$PATH"` and keep the run.
+- **Two state folders.** A project whose config sets `stateDir` and a launch with a different `-Dir` use different
+  state folders, and each numbers runs from its own manifest, so the same label can be `.1` in both. Launch every run of
+  a project from one state folder (`DS_STATE_DIR`).
+- **"Ahead of pace" soon after midnight.** As designed: the day's share is spread over the day's hours, so a few
+  reviews early in the day use a large part of a small share and new workers wait until it catches up. A share smaller
+  than one review is a reason to raise the budget or lengthen the period.
+
+## A lead reads its workers' reports (2026-10-01)
+
+A lead launched with `-Dir` on a worktree, while the project's `stateDir` pointed elsewhere, could not Read or Grep its
+workers' reports, which sat in the state folder outside its `-Dir` (denied=Grep,Read); it re-verified from the diff. A
+lead (`-CanSpawn`, not a training tier) now gets its state folder's `runs\` added read-only (`--add-dir` plus an Edit
+deny) when that folder is outside its `-Dir`. Probe: a lead in a scratch git folder, state elsewhere, Read another run's
+full report and Grepped its folder; both allowed, `denied` empty. A dry-run test covers it.
